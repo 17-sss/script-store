@@ -21,6 +21,25 @@ function Assert-True {
   }
 }
 
+function Get-FileText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  if (-not (Test-Path $Path)) {
+    return ""
+  }
+
+  $content = Get-Content $Path -Raw
+
+  if ($null -eq $content) {
+    return ""
+  }
+
+  return $content
+}
+
 function Assert-Contains {
   param(
     [Parameter(Mandatory = $true)]
@@ -71,9 +90,9 @@ try {
     -DefaultPorts 3000,5173 `
     -Yes
 
-  $profileContent = Get-Content $tempProfilePath -Raw
+  $profileContent = Get-FileText $tempProfilePath
   $sshConfigPath = Join-Path $tempSshDir "config"
-  $sshConfigContent = Get-Content $sshConfigPath -Raw
+  $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-Contains $profileContent "function devtunnel"
   Assert-Contains $profileContent "[Alias(""h"", ""-help"")]"
@@ -110,8 +129,8 @@ try {
     -DefaultPorts 6006 `
     -Yes
 
-  $profileContent = Get-Content $tempProfilePath -Raw
-  $sshConfigContent = Get-Content $sshConfigPath -Raw
+  $profileContent = Get-FileText $tempProfilePath
+  $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev >>>"
   Assert-Contains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev-next >>>"
@@ -124,8 +143,8 @@ try {
 
   & $managerPath remove -RemoveSshBlocks -Yes
 
-  $profileContent = Get-Content $tempProfilePath -Raw
-  $sshConfigContent = Get-Content $sshConfigPath -Raw
+  $profileContent = Get-FileText $tempProfilePath
+  $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-NotContains $profileContent "# >>> devtunnel function >>>"
   Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host:"

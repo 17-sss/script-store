@@ -62,6 +62,25 @@ function Ensure-File {
   }
 }
 
+function Get-FileText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  if (-not (Test-Path $Path)) {
+    return ""
+  }
+
+  $content = Get-Content $Path -Raw
+
+  if ($null -eq $content) {
+    return ""
+  }
+
+  return $content
+}
+
 function Read-WithDefault {
   param(
     [Parameter(Mandatory = $true)]
@@ -96,7 +115,7 @@ function Read-Required {
       return $value
     }
 
-    Write-Host "값을 입력해야 합니다." -ForegroundColor Yellow
+    Write-Host "A value is required." -ForegroundColor Yellow
   }
 }
 
@@ -126,7 +145,7 @@ function Read-Ports {
     return $ports
   }
   catch {
-    Write-Host "포트 형식이 올바르지 않아 기본값 3000을 사용합니다." -ForegroundColor Yellow
+    Write-Host "Invalid port list. Using default port 3000." -ForegroundColor Yellow
     return @(3000)
   }
 }
@@ -167,7 +186,7 @@ function Read-SshPort {
     return $port
   }
   catch {
-    Write-Host "SSH 포트가 올바르지 않아 기본값 $DefaultValue를 사용합니다." -ForegroundColor Yellow
+    Write-Host "Invalid SSH port. Using default port $DefaultValue." -ForegroundColor Yellow
     return $DefaultValue
   }
 }
@@ -177,7 +196,7 @@ function Remove-ProfileBlock {
     return
   }
 
-  $content = Get-Content $profilePath -Raw
+  $content = Get-FileText $profilePath
   $pattern = [regex]::Escape($profileStartMarker) + "[\s\S]*?" + [regex]::Escape($profileEndMarker) + "(\r?\n)?"
   $newContent = [regex]::Replace($content, $pattern, "")
 
@@ -280,7 +299,7 @@ devtunnel -Ports 3000 -HostAlias $DefaultHostAlias
 $profileEndMarker
 "@
 
-  $content = Get-Content $profilePath -Raw
+  $content = Get-FileText $profilePath
 
   if (-not [string]::IsNullOrWhiteSpace($content) -and -not $content.EndsWith("`n")) {
     Add-Content -Path $profilePath -Value ""
@@ -299,7 +318,7 @@ function Remove-SshHostBlock {
     return
   }
 
-  $content = Get-Content $sshConfigPath -Raw
+  $content = Get-FileText $sshConfigPath
 
   $startMarker = "$sshStartMarkerPrefix $HostAlias >>>"
   $endMarker = "$sshEndMarkerPrefix $HostAlias <<<"
@@ -352,7 +371,7 @@ $identityLine
 $endMarker
 "@
 
-  $content = Get-Content $sshConfigPath -Raw
+  $content = Get-FileText $sshConfigPath
 
   if (-not [string]::IsNullOrWhiteSpace($content) -and -not $content.EndsWith("`n")) {
     Add-Content -Path $sshConfigPath -Value ""
@@ -366,7 +385,7 @@ function Remove-AnyDevTunnelSshBlocks {
     return
   }
 
-  $content = Get-Content $sshConfigPath -Raw
+  $content = Get-FileText $sshConfigPath
 
   $pattern = "(?m)^" + [regex]::Escape($sshStartMarkerPrefix) + " .+ >>>\r?\n[\s\S]*?^" + [regex]::Escape($sshEndMarkerPrefix) + " .+ <<<(\r?\n)?"
   $newContent = [regex]::Replace($content, $pattern, "")
@@ -380,7 +399,7 @@ function Install-All {
   )
 
   Write-Host ""
-  Write-Host "devtunnel 설치 설정" -ForegroundColor Cyan
+  Write-Host "devtunnel setup" -ForegroundColor Cyan
   Write-Host ""
 
   if ([string]::IsNullOrWhiteSpace($HostAlias)) {
@@ -408,7 +427,7 @@ function Install-All {
     $resolvedSshPort = $SshPort
   }
   elseif ($SshPort -ne 0) {
-    Write-Host "SSH 포트가 올바르지 않아 기본값 22를 사용합니다." -ForegroundColor Yellow
+    Write-Host "Invalid SSH port. Using default port 22." -ForegroundColor Yellow
     $resolvedSshPort = 22
   }
   else {
@@ -435,7 +454,7 @@ function Install-All {
   }
 
   Write-Host ""
-  Write-Host "설정 요약" -ForegroundColor Cyan
+  Write-Host "Configuration summary" -ForegroundColor Cyan
   Write-Host "  SSH alias    : $resolvedHostAlias"
   Write-Host "  HostName/IP  : $resolvedHostName"
   Write-Host "  User         : $resolvedSshUser"
@@ -448,7 +467,7 @@ function Install-All {
     $confirm = Read-WithDefault "Install with this config? y/n" "y"
 
     if ($confirm -notin @("y", "Y", "yes", "YES")) {
-      Write-Host "취소했습니다." -ForegroundColor Yellow
+      Write-Host "Canceled." -ForegroundColor Yellow
       return
     }
   }
@@ -477,10 +496,10 @@ function Install-All {
   Write-Host "PowerShell profile:"
   Write-Host "  $profilePath"
   Write-Host ""
-  Write-Host "PowerShell을 재시작하거나 아래 명령을 실행하세요:"
+  Write-Host "Restart PowerShell or run:"
   Write-Host "  . `$PROFILE"
   Write-Host ""
-  Write-Host "테스트:"
+  Write-Host "Test commands:"
   Write-Host "  ssh $resolvedHostAlias"
   Write-Host "  devtunnel"
   Write-Host "  devtunnel -Ports 3000,5173,6006"
