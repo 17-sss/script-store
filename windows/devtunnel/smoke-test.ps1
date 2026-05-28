@@ -71,39 +71,25 @@ $tempSshDir = Join-Path $tempRoot ".ssh"
 
 $previousUserProfile = $env:USERPROFILE
 $previousProfilePath = $env:DEVTUNNEL_PROFILE_PATH
-$previousSshDir = $env:DEVTUNNEL_SSH_DIR
 
 try {
   New-Item -ItemType Directory -Path $tempUserProfile -Force | Out-Null
-  New-Item -ItemType Directory -Path $tempSshDir -Force | Out-Null
 
   $env:USERPROFILE = $tempUserProfile
   $env:DEVTUNNEL_PROFILE_PATH = $tempProfilePath
-  $env:DEVTUNNEL_SSH_DIR = $tempSshDir
 
-  & $managerPath install `
-    -HostAlias "smoke-dev" `
-    -HostName "127.0.0.1" `
-    -SshUser "devuser" `
-    -SshPort 2222 `
-    -SkipIdentityFile `
-    -DefaultPorts 3000,5173 `
-    -Yes
+  & $managerPath install -Yes
 
   $profileContent = Get-FileText $tempProfilePath
   $sshConfigPath = Join-Path $tempSshDir "config"
-  $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-Contains $profileContent "function devtunnel"
   Assert-Contains $profileContent "[Parameter(Position = 0)]"
+  Assert-Contains $profileContent "[Parameter(Position = 1)]"
   Assert-Contains $profileContent "[Alias(""h"")]"
   Assert-Contains $profileContent "Get-Help devtunnel -Detailed"
-  Assert-Contains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev >>>"
-  Assert-Contains $sshConfigContent "Host smoke-dev"
-  Assert-Contains $sshConfigContent "HostName 127.0.0.1"
-  Assert-Contains $sshConfigContent "User devuser"
-  Assert-Contains $sshConfigContent "Port 2222"
-  Assert-NotContains $sshConfigContent "IdentityFile"
+  Assert-Contains $profileContent "devtunnel 3000,5173,6006 prox-dev-hoyoung"
+  Assert-True -Condition (-not (Test-Path $sshConfigPath)) -Message "Install should not create SSH config"
 
   . $tempProfilePath
 
@@ -121,60 +107,35 @@ try {
   $shortHelpOutput = & { devtunnel -h } *>&1 | Out-String
   Assert-Contains $shortHelpOutput "Usage:"
 
-  $existingHostBlock = @"
-Host existing-dev
-  HostName 127.0.0.9
-  User existinguser
-  Port 2022
+  $missingArgsOutput = & { devtunnel } *>&1 | Out-String
+  Assert-Contains $missingArgsOutput "Ports and SSH host alias are required."
 
-"@
+  $script:CapturedSshArgs = @()
 
-  Add-Content -Path $sshConfigPath -Value $existingHostBlock -Encoding UTF8
+  function ssh {
+    $script:CapturedSshArgs = $args
+  }
 
-  & $managerPath install `
-    -SshHostMode existing `
-    -HostAlias "existing-dev" `
-    -DefaultPorts 8080 `
-    -Yes
+  devtunnel 3000,5173 smoke-dev
+  $captured = $script:CapturedSshArgs -join "|"
+  Assert-Contains $captured "-N|-L|3000:127.0.0.1:3000|-L|5173:127.0.0.1:5173|smoke-dev"
 
-  $profileContent = Get-FileText $tempProfilePath
-  $sshConfigContent = Get-FileText $sshConfigPath
+  devtunnel -Ports 6006 -HostAlias smoke-dev-next
+  $captured = $script:CapturedSshArgs -join "|"
+  Assert-Contains $captured "-N|-L|6006:127.0.0.1:6006|smoke-dev-next"
 
-  Assert-Contains $profileContent '[int[]]$Ports = @(8080)'
-  Assert-Contains $profileContent '[string]$HostAlias = "existing-dev"'
-  Assert-Contains $sshConfigContent "Host existing-dev"
-  Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host: existing-dev >>>"
-
-  & $managerPath reinstall `
-    -HostAlias "smoke-dev-next" `
-    -HostName "127.0.0.2" `
-    -SshUser "devuser2" `
-    -SshPort 22 `
-    -IdentityFile (Join-Path $tempUserProfile ".ssh\id_ed25519") `
-    -DefaultPorts 6006 `
-    -Yes
+  & $managerPath reinstall -Yes
 
   $profileContent = Get-FileText $tempProfilePath
-  $sshConfigContent = Get-FileText $sshConfigPath
+  Assert-Contains $profileContent "function devtunnel"
+  Assert-True -Condition (-not (Test-Path $sshConfigPath)) -Message "Reinstall should not create SSH config"
 
-  Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev >>>"
-  Assert-Contains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev-next >>>"
-  Assert-Contains $sshConfigContent "Host smoke-dev-next"
-  Assert-Contains $sshConfigContent "HostName 127.0.0.2"
-  Assert-Contains $sshConfigContent "User devuser2"
-  Assert-Contains $sshConfigContent "IdentityFile"
-  Assert-Contains $sshConfigContent "Host existing-dev"
-  Assert-Contains $profileContent '[int[]]$Ports = @(6006)'
-  Assert-Contains $profileContent '[string]$HostAlias = "smoke-dev-next"'
-
-  & $managerPath uninstall -RemoveSshBlocks -Yes
+  & $managerPath uninstall -Yes
 
   $profileContent = Get-FileText $tempProfilePath
-  $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-NotContains $profileContent "# >>> devtunnel function >>>"
-  Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host:"
-  Assert-Contains $sshConfigContent "Host existing-dev"
+  Assert-True -Condition (-not (Test-Path $sshConfigPath)) -Message "Uninstall should not create SSH config"
 
   Write-Host "devtunnel smoke test passed." -ForegroundColor Green
   Write-Host "Temp root: $tempRoot"
@@ -182,7 +143,6 @@ Host existing-dev
 finally {
   $env:USERPROFILE = $previousUserProfile
   $env:DEVTUNNEL_PROFILE_PATH = $previousProfilePath
-  $env:DEVTUNNEL_SSH_DIR = $previousSshDir
 
   if (-not $KeepTemp -and (Test-Path $tempRoot)) {
     Remove-Item -Path $tempRoot -Recurse -Force

@@ -1,8 +1,8 @@
 # devtunnel-manager
 
-Windows PowerShell에서 SSH 포트 포워딩을 쉽게 실행하기 위한 `devtunnel` 함수를 설치/제거/재설치하는 스크립트입니다.
+Windows PowerShell에서 SSH 포트 포워딩을 쉽게 실행하기 위한 `devtunnel` 함수를 설치/제거하는 스크립트입니다.
 
-Proxmox 위 Ubuntu VM 같은 원격 개발 서버에서 `pnpm dev`, `npm run dev`, `vite`, `next dev`, `storybook` 등을 실행한 뒤, Windows 로컬 브라우저에서 `http://localhost:3000` 같은 주소로 접속하고 싶을 때 사용합니다.
+원격 개발 서버에서 `pnpm dev`, `npm run dev`, `vite`, `next dev`, `storybook` 등을 실행한 뒤, Windows 로컬 브라우저에서 `http://localhost:3000` 같은 주소로 접속하고 싶을 때 사용합니다.
 
 ## 구성 파일
 
@@ -15,32 +15,20 @@ README.md
 ## 지원 기능
 
 - PowerShell `$PROFILE`에 `devtunnel` 함수 설치
-- Windows `~/.ssh/config`에 SSH host block 등록
-- 기존 SSH host alias 선택 지원
-- 설치 시 SSH 값 입력
-  - Host alias
-  - HostName / IP
-  - User
-  - Port
-  - IdentityFile
-  - 기본 포워딩 포트
-- 재설치 지원
-- 제거 지원 (`remove`, `uninstall`)
-- 여러 포트 동시 포워딩 지원
-- `devtunnel` 도움말 출력 지원
+- PowerShell `$PROFILE`에서 `devtunnel` 함수 제거
+- 실행 시 SSH host alias 입력
+- 실행 시 단일 포트 또는 여러 포트 입력
+- `Ctrl + C`로 열린 터널 종료
+- `devtunnel` 도움말 출력
+
+이 스크립트는 SSH config를 생성하거나 수정하지 않습니다. SSH alias는 사용자가 직접 관리하는 `~/.ssh/config`의 `Host`를 사용합니다.
 
 ## 설치 전 준비
 
-PowerShell에서 원격 Ubuntu VM에 SSH 접속이 가능한지 먼저 확인하세요.
+PowerShell에서 원격 개발 서버에 SSH 접속이 가능한지 먼저 확인하세요.
 
 ```powershell
-ssh user@server-ip
-```
-
-이미 `~/.ssh/config`에 host alias가 있다면 아래처럼 접속되는지도 확인합니다.
-
-```powershell
-ssh remote-ubuntu-dev
+ssh prox-dev-hoyoung
 ```
 
 ## 실행 정책 때문에 막힐 때
@@ -51,11 +39,9 @@ PowerShell 스크립트 실행이 막히면 현재 세션에서만 다음 명령
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-그 뒤 스크립트를 실행하면 됩니다.
-
 ## 실제 설치 전 스모크 테스트
 
-실제 PowerShell profile이나 SSH config를 건드리기 전에 임시 디렉터리에서 설치/재설치/제거 흐름을 검증할 수 있습니다.
+실제 PowerShell profile을 건드리기 전에 임시 디렉터리에서 설치/제거 흐름을 검증할 수 있습니다.
 
 ```powershell
 .\smoke-test.ps1
@@ -70,10 +56,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 테스트는 아래 항목을 확인합니다.
 
 - 임시 profile에 `devtunnel` 함수가 설치되는지
-- 임시 SSH config에 managed host block이 생성되는지
+- SSH config를 만들거나 수정하지 않는지
 - `devtunnel -Help`, `devtunnel -h`, `Get-Help devtunnel -Detailed`이 동작하는지
-- `reinstall`이 이전 managed SSH block을 제거하고 새 설정을 쓰는지
-- `remove -RemoveSshBlocks`가 managed block을 제거하는지
+- `devtunnel 3000,5173 alias`가 올바른 SSH 포워딩 인자를 만드는지
+- `uninstall`이 profile에서 함수 블록을 제거하는지
 
 ## 설치
 
@@ -81,40 +67,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\devtunnel-manager.ps1 install
 ```
 
-설치 중 아래 값들을 입력합니다.
-
-먼저 SSH 설정 방식을 선택합니다.
-
-```txt
-SSH host setup
-  [1] Add a new devtunnel-managed SSH host
-  [2] Use an existing SSH host from config
-Choose SSH setup mode: 1 new, 2 existing [2]
-```
-
-`[1]`을 선택하면 새 SSH host block을 `~/.ssh/config`에 추가합니다.
-
-```txt
-SSH Host alias [remote-ubuntu-dev]
-SSH HostName / IP
-SSH User [현재 Windows 사용자명]
-SSH Port [22]
-IdentityFile [C:\Users\...\ .ssh\id_ed25519] (type none to skip)
-Default ports, comma separated [3000]
-```
-
-예시:
-
-```txt
-SSH Host alias [remote-ubuntu-dev]: dev-vm
-SSH HostName / IP: 192.168.0.120
-SSH User [windows-user]: devuser
-SSH Port [22]: 22
-IdentityFile [C:\Users\devuser\.ssh\id_ed25519] (type none to skip):
-Default ports, comma separated [3000]: 3000,5173,6006
-```
-
-`[2]`를 선택하면 기존 `~/.ssh/config`의 `Host` 목록에서 alias를 고릅니다. 이 경우 SSH config는 변경하지 않고, PowerShell profile에 설치되는 `devtunnel` 함수의 기본 `HostAlias`만 해당 alias로 설정합니다.
+설치 중 SSH 관련 값은 입력하지 않습니다. 설치는 `devtunnel` 함수만 PowerShell profile에 추가합니다.
 
 설치 후 PowerShell을 재시작하거나 아래 명령을 실행하세요.
 
@@ -126,29 +79,23 @@ Default ports, comma separated [3000]: 3000,5173,6006
 
 ## 사용법
 
-기본 포트로 터널 열기:
+특정 포트 하나 열기:
 
 ```powershell
-devtunnel
-```
-
-특정 포트 하나만 열기:
-
-```powershell
-devtunnel 3000
-devtunnel -Ports 3000
+devtunnel 3123 prox-dev-hoyoung
 ```
 
 여러 포트 열기:
 
 ```powershell
-devtunnel -Ports 3000,5173,6006
+devtunnel 3000,5173,6006 prox-dev-hoyoung
 ```
 
-다른 SSH host alias로 열기:
+명시적 파라미터로 실행:
 
 ```powershell
-devtunnel -Ports 3000 -HostAlias remote-ubuntu-dev
+devtunnel -Ports 3123 -HostAlias prox-dev-hoyoung
+devtunnel -Ports 3000,5173,6006 -HostAlias prox-dev-hoyoung
 ```
 
 도움말 확인:
@@ -163,45 +110,59 @@ Get-Help devtunnel -Detailed
 
 ## 동작 예시
 
-원격 Ubuntu VM에서 개발 서버 실행:
+원격 개발 서버에서 개발 서버 실행:
 
 ```bash
-pnpm dev
+pnpm dev --port 3123
 ```
 
 Windows PowerShell에서 터널 실행:
 
 ```powershell
-devtunnel -Ports 3000
+devtunnel 3123 prox-dev-hoyoung
 ```
 
 Windows 브라우저에서 접속:
 
 ```txt
-http://localhost:3000
+http://localhost:3123
 ```
 
 동작 구조:
 
 ```txt
-Windows localhost:3000
+Windows localhost:3123
   -> SSH tunnel
-    -> Ubuntu VM 127.0.0.1:3000
+    -> prox-dev-hoyoung 127.0.0.1:3123
+```
+
+내부적으로는 다음 SSH 명령과 유사하게 동작합니다.
+
+```powershell
+ssh -N -L 3123:127.0.0.1:3123 prox-dev-hoyoung
+```
+
+여러 포트를 열면 `-L` 인자가 포트 수만큼 추가됩니다.
+
+```powershell
+ssh -N `
+  -L 3000:127.0.0.1:3000 `
+  -L 5173:127.0.0.1:5173 `
+  -L 6006:127.0.0.1:6006 `
+  prox-dev-hoyoung
 ```
 
 ## 재설치
 
-IP, 기본 포트, SSH user 등을 다시 입력받아 덮어쓰고 싶으면:
+`devtunnel` 함수를 다시 덮어쓰고 싶으면:
 
 ```powershell
 .\devtunnel-manager.ps1 reinstall
 ```
 
-기존에 이 스크립트가 설치한 `devtunnel` 함수 블록과 SSH config block을 새 설정으로 다시 설치합니다. 기존 SSH host alias를 선택하면 managed SSH config block은 제거되고 SSH config는 직접 만든 alias를 그대로 사용합니다.
+`install`도 기존 managed function block을 제거한 뒤 다시 쓰기 때문에 사실상 재설치처럼 동작합니다.
 
 ## 제거
-
-`devtunnel` 함수만 제거:
 
 ```powershell
 .\devtunnel-manager.ps1 remove
@@ -213,27 +174,12 @@ IP, 기본 포트, SSH user 등을 다시 입력받아 덮어쓰고 싶으면:
 .\devtunnel-manager.ps1 uninstall
 ```
 
-실행 중 다음 질문이 나옵니다.
-
-```txt
-Also remove devtunnel-managed SSH config blocks? y/n [n]
-```
-
-- `n`: PowerShell 함수만 제거하고 SSH config는 유지
-- `y`: 이 스크립트가 관리하는 SSH config block도 제거
-
 ## 설치되는 PowerShell 함수
 
 설치 후 PowerShell에서 아래 함수가 사용 가능해집니다.
 
 ```powershell
-devtunnel -Ports 3000,5173,6006 -HostAlias remote-ubuntu-dev
-```
-
-내부적으로는 다음 SSH 명령과 유사하게 동작합니다.
-
-```powershell
-ssh -N -L 3000:127.0.0.1:3000 -L 5173:127.0.0.1:5173 -L 6006:127.0.0.1:6006 remote-ubuntu-dev
+devtunnel 3000,5173,6006 prox-dev-hoyoung
 ```
 
 ## 자주 쓰는 포트
@@ -248,25 +194,14 @@ ssh -N -L 3000:127.0.0.1:3000 -L 5173:127.0.0.1:5173 -L 6006:127.0.0.1:6006 remo
 
 ## 주의사항
 
-이 스크립트는 아래 marker 사이의 내용만 관리합니다.
-
-PowerShell profile:
+이 스크립트는 PowerShell profile의 아래 marker 사이 내용만 관리합니다.
 
 ```powershell
 # >>> devtunnel function >>>
 # <<< devtunnel function <<<
 ```
 
-SSH config:
-
-```sshconfig
-# >>> devtunnel ssh host: <alias> >>>
-# <<< devtunnel ssh host: <alias> <<<
-```
-
-기존 SSH config 전체를 덮어쓰지는 않습니다.
-
-기존 SSH host alias를 선택해서 설치한 경우에는 SSH config에 새 managed block을 추가하지 않습니다.
+SSH config는 읽거나 쓰지 않습니다.
 
 ## 문제 해결
 
@@ -278,12 +213,22 @@ PowerShell을 재시작하거나 아래 명령을 실행하세요.
 . $PROFILE
 ```
 
-### 포트가 이미 사용 중이라고 나올 때
+### SSH alias를 찾을 수 없다고 나올 때
 
-Windows에서 해당 포트를 이미 사용 중일 수 있습니다. 다른 로컬 포트를 쓰려면 현재 스크립트의 `devtunnel`은 같은 포트끼리만 연결하므로, 임시로 직접 SSH 명령을 쓰는 편이 빠릅니다.
+먼저 일반 SSH 접속이 되는지 확인하세요.
 
 ```powershell
-ssh -N -L 3001:127.0.0.1:3000 remote-ubuntu-dev
+ssh prox-dev-hoyoung
+```
+
+이 명령이 실패하면 `devtunnel` 문제가 아니라 SSH config나 SSH 연결 문제입니다.
+
+### 포트가 이미 사용 중이라고 나올 때
+
+Windows에서 해당 포트를 이미 사용 중일 수 있습니다. 다른 포트로 개발 서버를 띄우거나, 직접 SSH 명령으로 로컬 포트와 원격 포트를 다르게 연결하세요.
+
+```powershell
+ssh -N -L 3001:127.0.0.1:3000 prox-dev-hoyoung
 ```
 
 그러면 Windows에서는 아래 주소로 접속합니다.
@@ -294,10 +239,10 @@ http://localhost:3001
 
 ### SSH 연결은 되는데 브라우저에서 안 열릴 때
 
-원격 Ubuntu VM에서 먼저 확인하세요.
+원격 개발 서버에서 먼저 확인하세요.
 
 ```bash
-curl http://127.0.0.1:3000
+curl http://127.0.0.1:3123
 ```
 
-이게 안 되면 터널 문제가 아니라 개발 서버가 원격 VM에서 제대로 실행되지 않은 상태입니다.
+이게 안 되면 터널 문제가 아니라 개발 서버가 원격 서버에서 제대로 실행되지 않은 상태입니다.
