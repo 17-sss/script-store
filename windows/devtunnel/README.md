@@ -37,7 +37,7 @@ ssh user@server-ip
 이미 `~/.ssh/config`에 host alias가 있다면 아래처럼 접속되는지도 확인합니다.
 
 ```powershell
-ssh company-ubuntu-dev
+ssh remote-ubuntu-dev
 ```
 
 ## 실행 정책 때문에 막힐 때
@@ -59,7 +59,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 설치 중 아래 값들을 입력합니다.
 
 ```txt
-SSH Host alias [company-ubuntu-dev]
+SSH Host alias [remote-ubuntu-dev]
 SSH HostName / IP
 SSH User [현재 Windows 사용자명]
 SSH Port [22]
@@ -70,11 +70,11 @@ Default ports, comma separated [3000]
 예시:
 
 ```txt
-SSH Host alias [company-ubuntu-dev]: pado-dev
+SSH Host alias [remote-ubuntu-dev]: dev-vm
 SSH HostName / IP: 192.168.0.120
-SSH User [my-windows-user]: pado
+SSH User [windows-user]: devuser
 SSH Port [22]: 22
-IdentityFile [C:\Users\me\.ssh\id_ed25519]:
+IdentityFile [C:\Users\devuser\.ssh\id_ed25519]:
 Default ports, comma separated [3000]: 3000,5173,6006
 ```
 
@@ -107,7 +107,7 @@ devtunnel -Ports 3000,5173,6006
 다른 SSH host alias로 열기:
 
 ```powershell
-devtunnel -Ports 3000 -HostAlias company-ubuntu-dev
+devtunnel -Ports 3000 -HostAlias remote-ubuntu-dev
 ```
 
 터널을 닫으려면 해당 터미널에서 `Ctrl + C`를 누르면 됩니다.
@@ -172,13 +172,13 @@ Also remove devtunnel-managed SSH config blocks? y/n [n]
 설치 후 PowerShell에서 아래 함수가 사용 가능해집니다.
 
 ```powershell
-devtunnel -Ports 3000,5173,6006 -HostAlias company-ubuntu-dev
+devtunnel -Ports 3000,5173,6006 -HostAlias remote-ubuntu-dev
 ```
 
 내부적으로는 다음 SSH 명령과 유사하게 동작합니다.
 
 ```powershell
-ssh -N -L 3000:127.0.0.1:3000 -L 5173:127.0.0.1:5173 -L 6006:127.0.0.1:6006 company-ubuntu-dev
+ssh -N -L 3000:127.0.0.1:3000 -L 5173:127.0.0.1:5173 -L 6006:127.0.0.1:6006 remote-ubuntu-dev
 ```
 
 ## 자주 쓰는 포트
@@ -226,7 +226,7 @@ PowerShell을 재시작하거나 아래 명령을 실행하세요.
 Windows에서 해당 포트를 이미 사용 중일 수 있습니다. 다른 로컬 포트를 쓰려면 현재 스크립트의 `devtunnel`은 같은 포트끼리만 연결하므로, 임시로 직접 SSH 명령을 쓰는 편이 빠릅니다.
 
 ```powershell
-ssh -N -L 3001:127.0.0.1:3000 company-ubuntu-dev
+ssh -N -L 3001:127.0.0.1:3000 remote-ubuntu-dev
 ```
 
 그러면 Windows에서는 아래 주소로 접속합니다.
