@@ -8,6 +8,7 @@ Proxmox 위 Ubuntu VM 같은 원격 개발 서버에서 `pnpm dev`, `npm run dev
 
 ```txt
 devtunnel-manager.ps1
+smoke-test.ps1
 README.md
 ```
 
@@ -25,6 +26,7 @@ README.md
 - 재설치 지원
 - 제거 지원
 - 여러 포트 동시 포워딩 지원
+- `devtunnel` 도움말 출력 지원
 
 ## 설치 전 준비
 
@@ -49,6 +51,28 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 그 뒤 스크립트를 실행하면 됩니다.
+
+## 실제 설치 전 스모크 테스트
+
+실제 PowerShell profile이나 SSH config를 건드리기 전에 임시 디렉터리에서 설치/재설치/제거 흐름을 검증할 수 있습니다.
+
+```powershell
+.\smoke-test.ps1
+```
+
+실패한 임시 파일을 확인하고 싶으면:
+
+```powershell
+.\smoke-test.ps1 -KeepTemp
+```
+
+테스트는 아래 항목을 확인합니다.
+
+- 임시 profile에 `devtunnel` 함수가 설치되는지
+- 임시 SSH config에 managed host block이 생성되는지
+- `devtunnel -Help`, `devtunnel --help`, `Get-Help devtunnel -Detailed`이 동작하는지
+- `reinstall`이 이전 managed SSH block을 제거하고 새 설정을 쓰는지
+- `remove -RemoveSshBlocks`가 managed block을 제거하는지
 
 ## 설치
 
@@ -108,6 +132,14 @@ devtunnel -Ports 3000,5173,6006
 
 ```powershell
 devtunnel -Ports 3000 -HostAlias remote-ubuntu-dev
+```
+
+도움말 확인:
+
+```powershell
+devtunnel -Help
+devtunnel --help
+Get-Help devtunnel -Detailed
 ```
 
 터널을 닫으려면 해당 터미널에서 `Ctrl + C`를 누르면 됩니다.

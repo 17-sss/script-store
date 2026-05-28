@@ -1,12 +1,42 @@
 param(
   [ValidateSet("install", "remove", "reinstall")]
-  [string]$Action = "install"
+  [string]$Action = "install",
+
+  [string]$HostAlias = "",
+
+  [string]$HostName = "",
+
+  [string]$SshUser = "",
+
+  [int]$SshPort = 0,
+
+  [AllowEmptyString()]
+  [string]$IdentityFile = $null,
+
+  [ValidateRange(1, 65535)]
+  [int[]]$DefaultPorts = @(),
+
+  [switch]$SkipIdentityFile,
+
+  [switch]$Yes,
+
+  [switch]$RemoveSshBlocks
 )
 
-$profilePath = $PROFILE
-$profileDir = Split-Path $profilePath -Parent
+if ([string]::IsNullOrWhiteSpace($env:DEVTUNNEL_PROFILE_PATH)) {
+  $profilePath = $PROFILE
+}
+else {
+  $profilePath = $env:DEVTUNNEL_PROFILE_PATH
+}
 
-$sshDir = Join-Path $env:USERPROFILE ".ssh"
+if ([string]::IsNullOrWhiteSpace($env:DEVTUNNEL_SSH_DIR)) {
+  $sshDir = Join-Path $env:USERPROFILE ".ssh"
+}
+else {
+  $sshDir = $env:DEVTUNNEL_SSH_DIR
+}
+
 $sshConfigPath = Join-Path $sshDir "config"
 
 $profileStartMarker = "# >>> devtunnel function >>>"
@@ -171,10 +201,59 @@ function Install-ProfileBlock {
   $functionBlock = @"
 $profileStartMarker
 function devtunnel {
+<#
+.SYNOPSIS
+Opens SSH local port forwards to a remote development host.
+
+.DESCRIPTION
+Opens one or more Windows localhost ports and forwards them to the same ports on
+127.0.0.1 behind the configured SSH host alias.
+
+.PARAMETER Ports
+Local ports to forward. Each local port maps to the same remote port.
+
+.PARAMETER HostAlias
+SSH config host alias to connect through.
+
+.PARAMETER Help
+Shows usage examples and exits.
+
+.EXAMPLE
+devtunnel
+
+.EXAMPLE
+devtunnel -Ports 3000,5173,6006
+
+.EXAMPLE
+devtunnel -Ports 3000 -HostAlias $DefaultHostAlias
+#>
+  [CmdletBinding()]
   param(
+    [ValidateRange(1, 65535)]
     [int[]]`$Ports = @($portsLiteral),
-    [string]`$HostAlias = "$DefaultHostAlias"
+
+    [string]`$HostAlias = "$DefaultHostAlias",
+
+    [Alias("h", "-help")]
+    [switch]`$Help
   )
+
+  if (`$Help) {
+    Write-Host "Usage:" -ForegroundColor Cyan
+    Write-Host "  devtunnel"
+    Write-Host "  devtunnel -Ports 3000"
+    Write-Host "  devtunnel -Ports 3000,5173,6006"
+    Write-Host "  devtunnel -Ports 3000 -HostAlias $DefaultHostAlias"
+    Write-Host ""
+    Write-Host "Options:" -ForegroundColor Cyan
+    Write-Host "  -Ports      Local ports to forward to the same remote ports."
+    Write-Host "  -HostAlias  SSH config host alias. Default: $DefaultHostAlias"
+    Write-Host "  -Help       Show this help. Also accepts --help."
+    Write-Host ""
+    Write-Host "More:"
+    Write-Host "  Get-Help devtunnel -Detailed"
+    return
+  }
 
   `$sshArgs = @("-N")
 
@@ -304,32 +383,74 @@ function Install-All {
   Write-Host "devtunnel 설치 설정" -ForegroundColor Cyan
   Write-Host ""
 
-  $hostAlias = Read-WithDefault "SSH Host alias" "remote-ubuntu-dev"
-  $hostName = Read-Required "SSH HostName / IP"
-  $sshUser = Read-WithDefault "SSH User" $env:USERNAME
+  if ([string]::IsNullOrWhiteSpace($HostAlias)) {
+    $resolvedHostAlias = Read-WithDefault "SSH Host alias" "remote-ubuntu-dev"
+  }
+  else {
+    $resolvedHostAlias = $HostAlias
+  }
 
-  $sshPort = Read-SshPort -DefaultValue 22
+  if ([string]::IsNullOrWhiteSpace($HostName)) {
+    $resolvedHostName = Read-Required "SSH HostName / IP"
+  }
+  else {
+    $resolvedHostName = $HostName
+  }
+
+  if ([string]::IsNullOrWhiteSpace($SshUser)) {
+    $resolvedSshUser = Read-WithDefault "SSH User" $env:USERNAME
+  }
+  else {
+    $resolvedSshUser = $SshUser
+  }
+
+  if ($SshPort -gt 0 -and $SshPort -le 65535) {
+    $resolvedSshPort = $SshPort
+  }
+  elseif ($SshPort -ne 0) {
+    Write-Host "SSH 포트가 올바르지 않아 기본값 22를 사용합니다." -ForegroundColor Yellow
+    $resolvedSshPort = 22
+  }
+  else {
+    $resolvedSshPort = Read-SshPort -DefaultValue 22
+  }
 
   $defaultIdentity = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
-  $identityFile = Read-OptionalIdentityFile -DefaultValue $defaultIdentity
 
-  $ports = Read-Ports -DefaultValue "3000"
+  if ($SkipIdentityFile) {
+    $resolvedIdentityFile = ""
+  }
+  elseif ($null -ne $IdentityFile) {
+    $resolvedIdentityFile = $IdentityFile
+  }
+  else {
+    $resolvedIdentityFile = Read-OptionalIdentityFile -DefaultValue $defaultIdentity
+  }
+
+  if ($DefaultPorts.Count -gt 0) {
+    $resolvedPorts = $DefaultPorts
+  }
+  else {
+    $resolvedPorts = Read-Ports -DefaultValue "3000"
+  }
 
   Write-Host ""
   Write-Host "설정 요약" -ForegroundColor Cyan
-  Write-Host "  SSH alias    : $hostAlias"
-  Write-Host "  HostName/IP  : $hostName"
-  Write-Host "  User         : $sshUser"
-  Write-Host "  Port         : $sshPort"
-  Write-Host "  IdentityFile : $identityFile"
-  Write-Host "  Dev ports    : $($ports -join ', ')"
+  Write-Host "  SSH alias    : $resolvedHostAlias"
+  Write-Host "  HostName/IP  : $resolvedHostName"
+  Write-Host "  User         : $resolvedSshUser"
+  Write-Host "  Port         : $resolvedSshPort"
+  Write-Host "  IdentityFile : $resolvedIdentityFile"
+  Write-Host "  Dev ports    : $($resolvedPorts -join ', ')"
   Write-Host ""
 
-  $confirm = Read-WithDefault "Install with this config? y/n" "y"
+  if (-not $Yes) {
+    $confirm = Read-WithDefault "Install with this config? y/n" "y"
 
-  if ($confirm -notin @("y", "Y", "yes", "YES")) {
-    Write-Host "취소했습니다." -ForegroundColor Yellow
-    return
+    if ($confirm -notin @("y", "Y", "yes", "YES")) {
+      Write-Host "취소했습니다." -ForegroundColor Yellow
+      return
+    }
   }
 
   if ($ReplaceManagedSshBlocks) {
@@ -337,15 +458,15 @@ function Install-All {
   }
 
   Install-SshHostBlock `
-    -HostAlias $hostAlias `
-    -HostName $hostName `
-    -User $sshUser `
-    -Port $sshPort `
-    -IdentityFile $identityFile
+    -HostAlias $resolvedHostAlias `
+    -HostName $resolvedHostName `
+    -User $resolvedSshUser `
+    -Port $resolvedSshPort `
+    -IdentityFile $resolvedIdentityFile
 
   Install-ProfileBlock `
-    -DefaultHostAlias $hostAlias `
-    -DefaultPorts $ports
+    -DefaultHostAlias $resolvedHostAlias `
+    -DefaultPorts $resolvedPorts
 
   Write-Host ""
   Write-Host "devtunnel installed." -ForegroundColor Green
@@ -360,7 +481,7 @@ function Install-All {
   Write-Host "  . `$PROFILE"
   Write-Host ""
   Write-Host "테스트:"
-  Write-Host "  ssh $hostAlias"
+  Write-Host "  ssh $resolvedHostAlias"
   Write-Host "  devtunnel"
   Write-Host "  devtunnel -Ports 3000,5173,6006"
 }
@@ -373,9 +494,14 @@ switch ($Action) {
   "remove" {
     Remove-ProfileBlock
 
-    $removeSsh = Read-WithDefault "Also remove devtunnel-managed SSH config blocks? y/n" "n"
+    $shouldRemoveSsh = $RemoveSshBlocks
 
-    if ($removeSsh -in @("y", "Y", "yes", "YES")) {
+    if (-not $shouldRemoveSsh -and -not $Yes) {
+      $removeSsh = Read-WithDefault "Also remove devtunnel-managed SSH config blocks? y/n" "n"
+      $shouldRemoveSsh = $removeSsh -in @("y", "Y", "yes", "YES")
+    }
+
+    if ($shouldRemoveSsh) {
       Remove-AnyDevTunnelSshBlocks
       Write-Host "devtunnel function and managed SSH blocks removed." -ForegroundColor Green
     }
