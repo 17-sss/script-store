@@ -101,6 +101,47 @@ function Read-Ports {
   }
 }
 
+function Read-OptionalIdentityFile {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$DefaultValue
+  )
+
+  $inputValue = Read-Host "IdentityFile [$DefaultValue] (type none to skip)"
+
+  if ([string]::IsNullOrWhiteSpace($inputValue)) {
+    return $DefaultValue
+  }
+
+  if ($inputValue -in @("none", "NONE", "None", "-")) {
+    return ""
+  }
+
+  return $inputValue
+}
+
+function Read-SshPort {
+  param(
+    [int]$DefaultValue = 22
+  )
+
+  $portInput = Read-WithDefault "SSH Port" "$DefaultValue"
+
+  try {
+    $port = [int]$portInput
+
+    if ($port -lt 1 -or $port -gt 65535) {
+      throw "Invalid port: $port"
+    }
+
+    return $port
+  }
+  catch {
+    Write-Host "SSH 포트가 올바르지 않아 기본값 $DefaultValue를 사용합니다." -ForegroundColor Yellow
+    return $DefaultValue
+  }
+}
+
 function Remove-ProfileBlock {
   if (-not (Test-Path $profilePath)) {
     return
@@ -248,32 +289,29 @@ function Remove-AnyDevTunnelSshBlocks {
 
   $content = Get-Content $sshConfigPath -Raw
 
-  $pattern = [regex]::Escape($sshStartMarkerPrefix) + "[\s\S]*?" + [regex]::Escape("<<<") + "(\r?\n)?"
+  $pattern = "(?m)^" + [regex]::Escape($sshStartMarkerPrefix) + " .+ >>>\r?\n[\s\S]*?^" + [regex]::Escape($sshEndMarkerPrefix) + " .+ <<<(\r?\n)?"
   $newContent = [regex]::Replace($content, $pattern, "")
 
   Set-Content -Path $sshConfigPath -Value $newContent -Encoding UTF8
 }
 
 function Install-All {
+  param(
+    [switch]$ReplaceManagedSshBlocks
+  )
+
   Write-Host ""
   Write-Host "devtunnel 설치 설정" -ForegroundColor Cyan
   Write-Host ""
 
-  $hostAlias = Read-WithDefault "SSH Host alias" "company-ubuntu-dev"
+  $hostAlias = Read-WithDefault "SSH Host alias" "remote-ubuntu-dev"
   $hostName = Read-Required "SSH HostName / IP"
   $sshUser = Read-WithDefault "SSH User" $env:USERNAME
 
-  $portInput = Read-WithDefault "SSH Port" "22"
-
-  try {
-    $sshPort = [int]$portInput
-  }
-  catch {
-    $sshPort = 22
-  }
+  $sshPort = Read-SshPort -DefaultValue 22
 
   $defaultIdentity = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
-  $identityFile = Read-WithDefault "IdentityFile, empty allowed" $defaultIdentity
+  $identityFile = Read-OptionalIdentityFile -DefaultValue $defaultIdentity
 
   $ports = Read-Ports -DefaultValue "3000"
 
@@ -292,6 +330,10 @@ function Install-All {
   if ($confirm -notin @("y", "Y", "yes", "YES")) {
     Write-Host "취소했습니다." -ForegroundColor Yellow
     return
+  }
+
+  if ($ReplaceManagedSshBlocks) {
+    Remove-AnyDevTunnelSshBlocks
   }
 
   Install-SshHostBlock `
@@ -343,7 +385,6 @@ switch ($Action) {
   }
 
   "reinstall" {
-    Remove-ProfileBlock
-    Install-All
+    Install-All -ReplaceManagedSshBlocks
   }
 }

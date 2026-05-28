@@ -63,7 +63,7 @@ SSH Host alias [remote-ubuntu-dev]
 SSH HostName / IP
 SSH User [현재 Windows 사용자명]
 SSH Port [22]
-IdentityFile [C:\Users\...\ .ssh\id_ed25519]
+IdentityFile [C:\Users\...\ .ssh\id_ed25519] (type none to skip)
 Default ports, comma separated [3000]
 ```
 
@@ -74,7 +74,7 @@ SSH Host alias [remote-ubuntu-dev]: dev-vm
 SSH HostName / IP: 192.168.0.120
 SSH User [windows-user]: devuser
 SSH Port [22]: 22
-IdentityFile [C:\Users\devuser\.ssh\id_ed25519]:
+IdentityFile [C:\Users\devuser\.ssh\id_ed25519] (type none to skip):
 Default ports, comma separated [3000]: 3000,5173,6006
 ```
 
@@ -148,7 +148,7 @@ IP, 기본 포트, SSH user 등을 다시 입력받아 덮어쓰고 싶으면:
 .\devtunnel-manager.ps1 reinstall
 ```
 
-기존에 이 스크립트가 설치한 `devtunnel` 함수 블록을 제거한 뒤 다시 설치합니다.
+기존에 이 스크립트가 설치한 `devtunnel` 함수 블록과 SSH config block을 새 설정으로 다시 설치합니다.
 
 ## 제거
 
