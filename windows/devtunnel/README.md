@@ -70,7 +70,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 - 임시 profile에 `devtunnel` 함수가 설치되는지
 - 임시 SSH config에 managed host block이 생성되는지
-- `devtunnel -Help`, `devtunnel --help`, `Get-Help devtunnel -Detailed`이 동작하는지
+- `devtunnel -Help`, `devtunnel -h`, `Get-Help devtunnel -Detailed`이 동작하는지
 - `reinstall`이 이전 managed SSH block을 제거하고 새 설정을 쓰는지
 - `remove -RemoveSshBlocks`가 managed block을 제거하는지
 
@@ -138,7 +138,7 @@ devtunnel -Ports 3000 -HostAlias remote-ubuntu-dev
 
 ```powershell
 devtunnel -Help
-devtunnel --help
+devtunnel -h
 Get-Help devtunnel -Detailed
 ```
 

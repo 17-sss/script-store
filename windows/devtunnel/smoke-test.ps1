@@ -95,7 +95,7 @@ try {
   $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-Contains $profileContent "function devtunnel"
-  Assert-Contains $profileContent "[Alias(""h"", ""-help"")]"
+  Assert-Contains $profileContent "[Alias(""h"")]"
   Assert-Contains $profileContent "Get-Help devtunnel -Detailed"
   Assert-Contains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev >>>"
   Assert-Contains $sshConfigContent "Host smoke-dev"
@@ -117,8 +117,8 @@ try {
   $helpOutput = & { devtunnel -Help } *>&1 | Out-String
   Assert-Contains $helpOutput "Usage:"
 
-  $unixHelpOutput = & { devtunnel --help } *>&1 | Out-String
-  Assert-Contains $unixHelpOutput "Usage:"
+  $shortHelpOutput = & { devtunnel -h } *>&1 | Out-String
+  Assert-Contains $shortHelpOutput "Usage:"
 
   & $managerPath reinstall `
     -HostAlias "smoke-dev-next" `

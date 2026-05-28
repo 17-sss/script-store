@@ -6,18 +6,18 @@
 - Scope: repo
 - Repo Root: .
 - Branch: main
-- Last Updated: 2026-05-28T13:55:32+09:00
+- Last Updated: 2026-05-28T14:14:52+09:00
 - Updated By: Codex
 
 ## TL;DR
 
 - Active work is `windows/devtunnel`: a PowerShell installer for a `devtunnel` SSH port-forward helper.
-- The smoke test now reaches installed-function help checks on Windows, but fails at `devtunnel --help`.
-- Recommended next step: simplify to PowerShell-native help only (`devtunnel -Help`, `devtunnel -h`, `Get-Help devtunnel -Detailed`) and remove `--help` from smoke test/docs/help text.
+- The Windows smoke test now passes locally.
+- GNU-style `devtunnel --help` was removed from docs/tests/help text; supported help paths are `devtunnel -Help`, `devtunnel -h`, and `Get-Help devtunnel -Detailed`.
 
 ## Current Objective
 
-Make `windows/devtunnel/smoke-test.ps1` pass on local Windows before running the installer against the real PowerShell profile and SSH config.
+Prepare for a real `devtunnel` install against the user's PowerShell profile and SSH config after confirming the desired SSH host settings.
 
 ## Current State
 
@@ -28,15 +28,17 @@ Make `windows/devtunnel/smoke-test.ps1` pass on local Windows before running the
 - `windows/devtunnel/smoke-test.ps1` was added to exercise install, help, reinstall, and remove against temp files only.
 - Empty `Get-Content -Raw` results are normalized through `Get-FileText`, fixing the earlier null regex failure.
 - Console-facing manager output is ASCII English to avoid Windows PowerShell encoding garbling.
+- Broken `--help` support claims were removed in favor of PowerShell-native `-Help` and `-h`.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File "windows\devtunnel\smoke-test.ps1" -KeepTemp` passed on Windows.
 
 ### In Progress
 
-- Windows smoke test still needs one follow-up change around GNU-style `--help`.
+- None.
 
 ### Needs Confirmation
 
-- A passing Windows run of `.\smoke-test.ps1 -KeepTemp`.
-- Actual manual install only after smoke passes.
+- Real SSH host settings for `.\devtunnel-manager.ps1 install`.
+- Actual manual install against real `$PROFILE` and real `~\.ssh\config`.
 
 ## Recent Changes
 
@@ -44,17 +46,12 @@ Make `windows/devtunnel/smoke-test.ps1` pass on local Windows before running the
 - Commit `a65ed6b`: hardened setup flow around identity file, SSH port validation, reinstall behavior, and managed block cleanup.
 - Commit `b28ab98`: added smoke coverage and non-interactive manager options.
 - Commit `043a297`: fixed empty temp-file reads and ASCII output after the first Windows smoke failure.
+- Latest work: removed `--help` references from manager help text, smoke test, and README.
 
 ## Known Issues / Watch List
 
-- Issue: `.\smoke-test.ps1 -KeepTemp` fails at `devtunnel --help`.
-- Evidence: Windows PowerShell reports it cannot convert `"--help"` to `System.Int32[]` for the `Ports` parameter.
-- Cause: `--help` is being treated as a positional argument, not as the `[Alias("-help")] [switch]$Help` parameter.
-- Recommendation: Do not fight PowerShell parsing unless GNU-style compatibility is truly required. Keep `-Help`, `-h`, and `Get-Help`; remove `--help` from:
-  - `windows/devtunnel/devtunnel-manager.ps1` generated help text
-  - `windows/devtunnel/smoke-test.ps1`
-  - `windows/devtunnel/README.md`
-- Risk: Leaving `--help` documented makes the smoke test fail and gives users a broken command.
+- No current smoke-test failures.
+- Real install needs user-specific SSH values and should not be run until those are confirmed.
 
 ## Quick Reference
 
@@ -84,32 +81,32 @@ Make `windows/devtunnel/smoke-test.ps1` pass on local Windows before running the
 ### Codex Linux Checks
 
 - `git diff --check`: passed before the last commit.
+- `git diff --check`: passed after the latest local changes.
 - `commit-helper` commits succeeded through `043a297`.
 
-### User Windows Checks
+### Codex Windows Checks
 
-- `.\smoke-test.ps1 -KeepTemp`: advanced past install and earlier null-file issue.
-- Current failure is isolated to `devtunnel --help`.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File "windows\devtunnel\smoke-test.ps1" -KeepTemp`: passed on 2026-05-28.
+- Temp root from the passing run: `C:\Users\User\AppData\Local\Temp\devtunnel-smoke-eb13af288eb8497389303bdcc95fe8a8`.
 
 ### Pending Checks
 
-- Passing Windows smoke test after removing or reworking `--help`.
 - Actual install against real `$PROFILE` and real `~\.ssh\config`.
 
 ## Next Actions
 
-1. Remove `--help` support claims and smoke assertion; keep `devtunnel -Help`, `devtunnel -h`, and `Get-Help devtunnel -Detailed`.
-2. Commit that fix, then ask the user to rerun `cd windows\devtunnel; .\smoke-test.ps1 -KeepTemp` on Windows.
-3. If smoke passes, review the temp `profile.ps1` and `.ssh\config`, then run the real install.
+1. Confirm real SSH values.
+2. Run `cd windows\devtunnel; .\devtunnel-manager.ps1 install`.
+3. Restart PowerShell or run `. $PROFILE`, then test `devtunnel -Help` and `devtunnel`.
 
 ## Resume Checklist
 
-- Run `git status --short` and confirm only this handoff doc is new/modified unless new work has happened.
+- Run `git status --short`.
 - Re-open `windows/devtunnel/devtunnel-manager.ps1` around the generated `devtunnel` function.
-- Re-open `windows/devtunnel/smoke-test.ps1` around the `devtunnel --help` assertion.
+- Re-open `windows/devtunnel/smoke-test.ps1` around the help assertions.
 - Re-open `windows/devtunnel/README.md` around the help usage section.
-- Apply the first next action before changing unrelated installer behavior.
+- Avoid unrelated installer behavior changes.
 
 ## Resume Prompt
 
-Continue the `windows/devtunnel` smoke-test hardening work. First verify the repo still matches `docs/HANDOFF.md`, then remove the broken `--help` path in favor of PowerShell-native `-Help` / `-h` / `Get-Help`, update README and smoke test consistently, validate with `git diff --check`, and prepare the user to rerun the Windows smoke test.
+Continue the `windows/devtunnel` install prep. Verify the committed state, confirm the user's real SSH host values, then run `.\devtunnel-manager.ps1 install` only when the user is ready to update the real PowerShell profile and SSH config.

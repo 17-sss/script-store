@@ -253,7 +253,7 @@ devtunnel -Ports 3000 -HostAlias $DefaultHostAlias
 
     [string]`$HostAlias = "$DefaultHostAlias",
 
-    [Alias("h", "-help")]
+    [Alias("h")]
     [switch]`$Help
   )
 
@@ -267,7 +267,7 @@ devtunnel -Ports 3000 -HostAlias $DefaultHostAlias
     Write-Host "Options:" -ForegroundColor Cyan
     Write-Host "  -Ports      Local ports to forward to the same remote ports."
     Write-Host "  -HostAlias  SSH config host alias. Default: $DefaultHostAlias"
-    Write-Host "  -Help       Show this help. Also accepts --help."
+    Write-Host "  -Help       Show this help. Also accepts -h."
     Write-Host ""
     Write-Host "More:"
     Write-Host "  Get-Help devtunnel -Detailed"
