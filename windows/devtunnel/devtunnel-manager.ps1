@@ -10,6 +10,9 @@ param(
 
   [int]$SshPort = 0,
 
+  [ValidateSet("prompt", "new", "existing")]
+  [string]$SshHostMode = "prompt",
+
   [AllowEmptyString()]
   [string]$IdentityFile = $null,
 
@@ -188,6 +191,124 @@ function Read-SshPort {
   catch {
     Write-Host "Invalid SSH port. Using default port $DefaultValue." -ForegroundColor Yellow
     return $DefaultValue
+  }
+}
+
+function Get-SshHostAliases {
+  if (-not (Test-Path $sshConfigPath)) {
+    return @()
+  }
+
+  $aliases = @()
+  $lines = Get-Content -Path $sshConfigPath
+
+  foreach ($line in $lines) {
+    $trimmed = $line.Trim()
+
+    if ($trimmed -match "(?i)^Host\s+(.+)$") {
+      $tokens = $Matches[1] -split "\s+"
+
+      foreach ($token in $tokens) {
+        if ($token.StartsWith("#")) {
+          break
+        }
+
+        if ([string]::IsNullOrWhiteSpace($token)) {
+          continue
+        }
+
+        if ($token -match "[*?!]") {
+          continue
+        }
+
+        if ($aliases -notcontains $token) {
+          $aliases += $token
+        }
+      }
+    }
+  }
+
+  return $aliases
+}
+
+function Read-SshHostMode {
+  param(
+    [string[]]$ExistingAliases = @()
+  )
+
+  if ($SshHostMode -ne "prompt") {
+    return $SshHostMode
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($HostName)) {
+    return "new"
+  }
+
+  Write-Host "SSH host setup" -ForegroundColor Cyan
+  Write-Host "  [1] Add a new devtunnel-managed SSH host"
+  Write-Host "  [2] Use an existing SSH host from config"
+  Write-Host ""
+
+  if ($ExistingAliases.Count -gt 0) {
+    $defaultMode = "2"
+  }
+  else {
+    Write-Host "No existing SSH Host entries were found in $sshConfigPath." -ForegroundColor Yellow
+    $defaultMode = "1"
+  }
+
+  while ($true) {
+    $choice = Read-WithDefault "Choose SSH setup mode: 1 new, 2 existing" $defaultMode
+
+    if ($choice -in @("1", "n", "N", "new", "NEW")) {
+      return "new"
+    }
+
+    if ($choice -in @("2", "e", "E", "existing", "EXISTING")) {
+      return "existing"
+    }
+
+    Write-Host "Please choose 1 or 2." -ForegroundColor Yellow
+  }
+}
+
+function Read-ExistingHostAlias {
+  param(
+    [string[]]$ExistingAliases = @()
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($HostAlias)) {
+    return $HostAlias
+  }
+
+  if ($ExistingAliases.Count -eq 0) {
+    return Read-Required "Existing SSH Host alias"
+  }
+
+  Write-Host "Existing SSH hosts" -ForegroundColor Cyan
+
+  for ($index = 0; $index -lt $ExistingAliases.Count; $index++) {
+    $displayNumber = $index + 1
+    Write-Host "  [$displayNumber] $($ExistingAliases[$index])"
+  }
+
+  Write-Host ""
+
+  while ($true) {
+    $choice = Read-WithDefault "Select SSH Host alias by number or name" $ExistingAliases[0]
+    $choiceNumber = 0
+
+    if ([int]::TryParse($choice, [ref]$choiceNumber)) {
+      if ($choiceNumber -ge 1 -and $choiceNumber -le $ExistingAliases.Count) {
+        return $ExistingAliases[$choiceNumber - 1]
+      }
+    }
+
+    if ($ExistingAliases -contains $choice) {
+      return $choice
+    }
+
+    Write-Host "Please choose a listed number or alias." -ForegroundColor Yellow
   }
 }
 
@@ -402,48 +523,56 @@ function Install-All {
   Write-Host "devtunnel setup" -ForegroundColor Cyan
   Write-Host ""
 
-  if ([string]::IsNullOrWhiteSpace($HostAlias)) {
-    $resolvedHostAlias = Read-WithDefault "SSH Host alias" "remote-ubuntu-dev"
+  $existingAliases = @(Get-SshHostAliases)
+  $resolvedSshHostMode = Read-SshHostMode -ExistingAliases $existingAliases
+
+  if ($resolvedSshHostMode -eq "existing") {
+    $resolvedHostAlias = Read-ExistingHostAlias -ExistingAliases $existingAliases
   }
   else {
-    $resolvedHostAlias = $HostAlias
-  }
+    if ([string]::IsNullOrWhiteSpace($HostAlias)) {
+      $resolvedHostAlias = Read-WithDefault "SSH Host alias" "remote-ubuntu-dev"
+    }
+    else {
+      $resolvedHostAlias = $HostAlias
+    }
 
-  if ([string]::IsNullOrWhiteSpace($HostName)) {
-    $resolvedHostName = Read-Required "SSH HostName / IP"
-  }
-  else {
-    $resolvedHostName = $HostName
-  }
+    if ([string]::IsNullOrWhiteSpace($HostName)) {
+      $resolvedHostName = Read-Required "SSH HostName / IP"
+    }
+    else {
+      $resolvedHostName = $HostName
+    }
 
-  if ([string]::IsNullOrWhiteSpace($SshUser)) {
-    $resolvedSshUser = Read-WithDefault "SSH User" $env:USERNAME
-  }
-  else {
-    $resolvedSshUser = $SshUser
-  }
+    if ([string]::IsNullOrWhiteSpace($SshUser)) {
+      $resolvedSshUser = Read-WithDefault "SSH User" $env:USERNAME
+    }
+    else {
+      $resolvedSshUser = $SshUser
+    }
 
-  if ($SshPort -gt 0 -and $SshPort -le 65535) {
-    $resolvedSshPort = $SshPort
-  }
-  elseif ($SshPort -ne 0) {
-    Write-Host "Invalid SSH port. Using default port 22." -ForegroundColor Yellow
-    $resolvedSshPort = 22
-  }
-  else {
-    $resolvedSshPort = Read-SshPort -DefaultValue 22
-  }
+    if ($SshPort -gt 0 -and $SshPort -le 65535) {
+      $resolvedSshPort = $SshPort
+    }
+    elseif ($SshPort -ne 0) {
+      Write-Host "Invalid SSH port. Using default port 22." -ForegroundColor Yellow
+      $resolvedSshPort = 22
+    }
+    else {
+      $resolvedSshPort = Read-SshPort -DefaultValue 22
+    }
 
-  $defaultIdentity = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
+    $defaultIdentity = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
 
-  if ($SkipIdentityFile) {
-    $resolvedIdentityFile = ""
-  }
-  elseif ($null -ne $IdentityFile) {
-    $resolvedIdentityFile = $IdentityFile
-  }
-  else {
-    $resolvedIdentityFile = Read-OptionalIdentityFile -DefaultValue $defaultIdentity
+    if ($SkipIdentityFile) {
+      $resolvedIdentityFile = ""
+    }
+    elseif ($null -ne $IdentityFile) {
+      $resolvedIdentityFile = $IdentityFile
+    }
+    else {
+      $resolvedIdentityFile = Read-OptionalIdentityFile -DefaultValue $defaultIdentity
+    }
   }
 
   if ($DefaultPorts.Count -gt 0) {
@@ -455,11 +584,19 @@ function Install-All {
 
   Write-Host ""
   Write-Host "Configuration summary" -ForegroundColor Cyan
+  Write-Host "  SSH mode     : $resolvedSshHostMode"
   Write-Host "  SSH alias    : $resolvedHostAlias"
-  Write-Host "  HostName/IP  : $resolvedHostName"
-  Write-Host "  User         : $resolvedSshUser"
-  Write-Host "  Port         : $resolvedSshPort"
-  Write-Host "  IdentityFile : $resolvedIdentityFile"
+
+  if ($resolvedSshHostMode -eq "existing") {
+    Write-Host "  SSH config   : unchanged"
+  }
+  else {
+    Write-Host "  HostName/IP  : $resolvedHostName"
+    Write-Host "  User         : $resolvedSshUser"
+    Write-Host "  Port         : $resolvedSshPort"
+    Write-Host "  IdentityFile : $resolvedIdentityFile"
+  }
+
   Write-Host "  Dev ports    : $($resolvedPorts -join ', ')"
   Write-Host ""
 
@@ -476,12 +613,14 @@ function Install-All {
     Remove-AnyDevTunnelSshBlocks
   }
 
-  Install-SshHostBlock `
-    -HostAlias $resolvedHostAlias `
-    -HostName $resolvedHostName `
-    -User $resolvedSshUser `
-    -Port $resolvedSshPort `
-    -IdentityFile $resolvedIdentityFile
+  if ($resolvedSshHostMode -ne "existing") {
+    Install-SshHostBlock `
+      -HostAlias $resolvedHostAlias `
+      -HostName $resolvedHostName `
+      -User $resolvedSshUser `
+      -Port $resolvedSshPort `
+      -IdentityFile $resolvedIdentityFile
+  }
 
   Install-ProfileBlock `
     -DefaultHostAlias $resolvedHostAlias `
@@ -490,9 +629,18 @@ function Install-All {
   Write-Host ""
   Write-Host "devtunnel installed." -ForegroundColor Green
   Write-Host ""
-  Write-Host "SSH config:"
-  Write-Host "  $sshConfigPath"
-  Write-Host ""
+
+  if ($resolvedSshHostMode -eq "existing") {
+    Write-Host "SSH config unchanged:"
+    Write-Host "  $sshConfigPath"
+    Write-Host ""
+  }
+  else {
+    Write-Host "SSH config:"
+    Write-Host "  $sshConfigPath"
+    Write-Host ""
+  }
+
   Write-Host "PowerShell profile:"
   Write-Host "  $profilePath"
   Write-Host ""

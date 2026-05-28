@@ -120,6 +120,30 @@ try {
   $shortHelpOutput = & { devtunnel -h } *>&1 | Out-String
   Assert-Contains $shortHelpOutput "Usage:"
 
+  $existingHostBlock = @"
+Host existing-dev
+  HostName 127.0.0.9
+  User existinguser
+  Port 2022
+
+"@
+
+  Add-Content -Path $sshConfigPath -Value $existingHostBlock -Encoding UTF8
+
+  & $managerPath install `
+    -SshHostMode existing `
+    -HostAlias "existing-dev" `
+    -DefaultPorts 8080 `
+    -Yes
+
+  $profileContent = Get-FileText $tempProfilePath
+  $sshConfigContent = Get-FileText $sshConfigPath
+
+  Assert-Contains $profileContent '[int[]]$Ports = @(8080)'
+  Assert-Contains $profileContent '[string]$HostAlias = "existing-dev"'
+  Assert-Contains $sshConfigContent "Host existing-dev"
+  Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host: existing-dev >>>"
+
   & $managerPath reinstall `
     -HostAlias "smoke-dev-next" `
     -HostName "127.0.0.2" `
@@ -138,6 +162,7 @@ try {
   Assert-Contains $sshConfigContent "HostName 127.0.0.2"
   Assert-Contains $sshConfigContent "User devuser2"
   Assert-Contains $sshConfigContent "IdentityFile"
+  Assert-Contains $sshConfigContent "Host existing-dev"
   Assert-Contains $profileContent '[int[]]$Ports = @(6006)'
   Assert-Contains $profileContent '[string]$HostAlias = "smoke-dev-next"'
 
@@ -148,6 +173,7 @@ try {
 
   Assert-NotContains $profileContent "# >>> devtunnel function >>>"
   Assert-NotContains $sshConfigContent "# >>> devtunnel ssh host:"
+  Assert-Contains $sshConfigContent "Host existing-dev"
 
   Write-Host "devtunnel smoke test passed." -ForegroundColor Green
   Write-Host "Temp root: $tempRoot"

@@ -16,6 +16,7 @@ README.md
 
 - PowerShell `$PROFILE`에 `devtunnel` 함수 설치
 - Windows `~/.ssh/config`에 SSH host block 등록
+- 기존 SSH host alias 선택 지원
 - 설치 시 SSH 값 입력
   - Host alias
   - HostName / IP
@@ -82,6 +83,17 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 설치 중 아래 값들을 입력합니다.
 
+먼저 SSH 설정 방식을 선택합니다.
+
+```txt
+SSH host setup
+  [1] Add a new devtunnel-managed SSH host
+  [2] Use an existing SSH host from config
+Choose SSH setup mode: 1 new, 2 existing [2]
+```
+
+`[1]`을 선택하면 새 SSH host block을 `~/.ssh/config`에 추가합니다.
+
 ```txt
 SSH Host alias [remote-ubuntu-dev]
 SSH HostName / IP
@@ -101,6 +113,8 @@ SSH Port [22]: 22
 IdentityFile [C:\Users\devuser\.ssh\id_ed25519] (type none to skip):
 Default ports, comma separated [3000]: 3000,5173,6006
 ```
+
+`[2]`를 선택하면 기존 `~/.ssh/config`의 `Host` 목록에서 alias를 고릅니다. 이 경우 SSH config는 변경하지 않고, PowerShell profile에 설치되는 `devtunnel` 함수의 기본 `HostAlias`만 해당 alias로 설정합니다.
 
 설치 후 PowerShell을 재시작하거나 아래 명령을 실행하세요.
 
@@ -180,7 +194,7 @@ IP, 기본 포트, SSH user 등을 다시 입력받아 덮어쓰고 싶으면:
 .\devtunnel-manager.ps1 reinstall
 ```
 
-기존에 이 스크립트가 설치한 `devtunnel` 함수 블록과 SSH config block을 새 설정으로 다시 설치합니다.
+기존에 이 스크립트가 설치한 `devtunnel` 함수 블록과 SSH config block을 새 설정으로 다시 설치합니다. 기존 SSH host alias를 선택하면 managed SSH config block은 제거되고 SSH config는 직접 만든 alias를 그대로 사용합니다.
 
 ## 제거
 
@@ -242,6 +256,8 @@ SSH config:
 ```
 
 기존 SSH config 전체를 덮어쓰지는 않습니다.
+
+기존 SSH host alias를 선택해서 설치한 경우에는 SSH config에 새 managed block을 추가하지 않습니다.
 
 ## 문제 해결
 
