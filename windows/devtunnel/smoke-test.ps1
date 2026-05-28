@@ -95,6 +95,7 @@ try {
   $sshConfigContent = Get-FileText $sshConfigPath
 
   Assert-Contains $profileContent "function devtunnel"
+  Assert-Contains $profileContent "[Parameter(Position = 0)]"
   Assert-Contains $profileContent "[Alias(""h"")]"
   Assert-Contains $profileContent "Get-Help devtunnel -Detailed"
   Assert-Contains $sshConfigContent "# >>> devtunnel ssh host: smoke-dev >>>"
@@ -166,7 +167,7 @@ Host existing-dev
   Assert-Contains $profileContent '[int[]]$Ports = @(6006)'
   Assert-Contains $profileContent '[string]$HostAlias = "smoke-dev-next"'
 
-  & $managerPath remove -RemoveSshBlocks -Yes
+  & $managerPath uninstall -RemoveSshBlocks -Yes
 
   $profileContent = Get-FileText $tempProfilePath
   $sshConfigContent = Get-FileText $sshConfigPath

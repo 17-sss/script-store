@@ -6,7 +6,7 @@
 - Scope: repo
 - Repo Root: .
 - Branch: main
-- Last Updated: 2026-05-28T14:23:53+09:00
+- Last Updated: 2026-05-28T14:33:57+09:00
 - Updated By: Codex
 
 ## TL;DR
@@ -14,11 +14,13 @@
 - Active work is `windows/devtunnel`: a PowerShell installer for a `devtunnel` SSH port-forward helper.
 - The installer now offers a validated new-vs-existing SSH host setup flow.
 - Existing SSH host mode installs only the PowerShell `devtunnel` function and leaves SSH config unchanged.
+- Installer output now explicitly tells users to run `. $PROFILE` or restart PowerShell before using `devtunnel`.
+- `uninstall` is accepted as an alias for `remove`, and generated `devtunnel` accepts positional ports such as `devtunnel 3123`.
 - GNU-style `devtunnel --help` was removed from docs/tests/help text; supported help paths are `devtunnel -Help`, `devtunnel -h`, and `Get-Help devtunnel -Detailed`.
 
 ## Current Objective
 
-Commit the validated installer flow that lets users choose between adding a new devtunnel-managed SSH host and selecting an existing SSH config Host alias.
+Commit the latest UX fixes for profile loading guidance, `uninstall`, and positional port usage.
 
 ## Current State
 
@@ -36,10 +38,14 @@ Commit the validated installer flow that lets users choose between adding a new 
 - `windows/devtunnel/smoke-test.ps1` now covers existing SSH host mode.
 - `powershell -NoProfile -ExecutionPolicy Bypass -File "windows\devtunnel\smoke-test.ps1" -KeepTemp` passed after the existing-host-mode changes.
 - `git diff --check` passed after the existing-host-mode changes.
+- Install output now prints the selected default ports in the suggested test command.
+- `windows/devtunnel/devtunnel-manager.ps1 uninstall` is supported.
+- Generated `devtunnel` marks `Ports` as positional, so `devtunnel 3123` works after the function is loaded.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File "windows\devtunnel\smoke-test.ps1" -KeepTemp` passed after the latest UX fixes.
 
 ### In Progress
 
-- Commit the existing-host flow change.
+- Run `git diff --check` and commit the latest UX fixes.
 
 ### Needs Confirmation
 
@@ -52,12 +58,13 @@ Commit the validated installer flow that lets users choose between adding a new 
 - Commit `b28ab98`: added smoke coverage and non-interactive manager options.
 - Commit `043a297`: fixed empty temp-file reads and ASCII output after the first Windows smoke failure.
 - Latest work: removed `--help` references from manager help text, smoke test, and README.
-- Latest local work: added install-time choice between new managed SSH host and existing SSH host alias.
+- Latest committed work: added install-time choice between new managed SSH host and existing SSH host alias.
+- Latest local work: clarified profile loading, added `uninstall`, made ports positional, and printed selected test ports.
 
 ## Known Issues / Watch List
 
 - No current smoke-test failures.
-- Real install should be run only after the existing-host-mode change is committed.
+- Users must run `. $PROFILE` or restart PowerShell after install before `devtunnel` is available in the current shell.
 
 ## Quick Reference
 
@@ -96,25 +103,29 @@ Commit the validated installer flow that lets users choose between adding a new 
 - Temp root from the passing run: `C:\Users\User\AppData\Local\Temp\devtunnel-smoke-eb13af288eb8497389303bdcc95fe8a8`.
 - `powershell -NoProfile -ExecutionPolicy Bypass -File "windows\devtunnel\smoke-test.ps1" -KeepTemp`: passed again after existing-host-mode changes on 2026-05-28.
 - Temp root from the latest passing run: `C:\Users\User\AppData\Local\Temp\devtunnel-smoke-56db98b584dd4e5aa6a3cde870659080`.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File "windows\devtunnel\smoke-test.ps1" -KeepTemp`: passed after profile-loading/uninstall/positional-port fixes on 2026-05-28.
+- Temp root from the latest passing run: `C:\Users\User\AppData\Local\Temp\devtunnel-smoke-223d869b6d294b95a6168d40cc4ee9ab`.
 
 ### Pending Checks
 
+- `git diff --check` after the latest UX fixes.
 - Actual install against real `$PROFILE` and real `~\.ssh\config`.
 
 ## Next Actions
 
-1. Commit the existing-host-mode change.
-2. Run `cd windows\devtunnel; .\devtunnel-manager.ps1 install` when ready.
-3. Choose `[2] Use an existing SSH host from config` if the current SSH config already has the target Host alias.
+1. Run `git diff --check`.
+2. Commit the latest UX fixes.
+3. If the user has already installed, run `. $PROFILE` to load `devtunnel` in the current shell.
+4. Rerun install only if the updated positional-port function should be written into the real profile.
 
 ## Resume Checklist
 
 - Run `git status --short`.
-- Re-open `windows/devtunnel/devtunnel-manager.ps1` around `SshHostMode`, `Get-SshHostAliases`, and `Install-All`.
-- Re-open `windows/devtunnel/smoke-test.ps1` around the existing-host-mode assertions.
+- Re-open `windows/devtunnel/devtunnel-manager.ps1` around `ValidateSet`, generated `Ports`, `Remove-All`, and `Install-All` output.
+- Re-open `windows/devtunnel/smoke-test.ps1` around the generated function and uninstall assertions.
 - Re-open `windows/devtunnel/README.md` around the install section.
 - Avoid unrelated installer behavior changes.
 
 ## Resume Prompt
 
-Continue the `windows/devtunnel` existing-host install mode work. Run the smoke test and `git diff --check`, commit the change if they pass, then use the new installer prompt to choose whether to add a new SSH host or use an existing SSH config Host alias.
+Continue the `windows/devtunnel` UX fixes. Smoke test already passed after adding profile-loading guidance, `uninstall`, and positional ports; run `git diff --check`, commit if clean, then tell the user to run `. $PROFILE` before using the just-installed `devtunnel` in the current shell.

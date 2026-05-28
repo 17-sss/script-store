@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("install", "remove", "reinstall")]
+  [ValidateSet("install", "remove", "uninstall", "reinstall")]
   [string]$Action = "install",
 
   [string]$HostAlias = "",
@@ -369,6 +369,7 @@ devtunnel -Ports 3000 -HostAlias $DefaultHostAlias
 #>
   [CmdletBinding()]
   param(
+    [Parameter(Position = 0)]
     [ValidateRange(1, 65535)]
     [int[]]`$Ports = @($portsLiteral),
 
@@ -381,6 +382,7 @@ devtunnel -Ports 3000 -HostAlias $DefaultHostAlias
   if (`$Help) {
     Write-Host "Usage:" -ForegroundColor Cyan
     Write-Host "  devtunnel"
+    Write-Host "  devtunnel 3000"
     Write-Host "  devtunnel -Ports 3000"
     Write-Host "  devtunnel -Ports 3000,5173,6006"
     Write-Host "  devtunnel -Ports 3000 -HostAlias $DefaultHostAlias"
@@ -514,6 +516,25 @@ function Remove-AnyDevTunnelSshBlocks {
   Set-Content -Path $sshConfigPath -Value $newContent -Encoding UTF8
 }
 
+function Remove-All {
+  Remove-ProfileBlock
+
+  $shouldRemoveSsh = $RemoveSshBlocks
+
+  if (-not $shouldRemoveSsh -and -not $Yes) {
+    $removeSsh = Read-WithDefault "Also remove devtunnel-managed SSH config blocks? y/n" "n"
+    $shouldRemoveSsh = $removeSsh -in @("y", "Y", "yes", "YES")
+  }
+
+  if ($shouldRemoveSsh) {
+    Remove-AnyDevTunnelSshBlocks
+    Write-Host "devtunnel function and managed SSH blocks removed." -ForegroundColor Green
+  }
+  else {
+    Write-Host "devtunnel function removed. SSH config kept." -ForegroundColor Green
+  }
+}
+
 function Install-All {
   param(
     [switch]$ReplaceManagedSshBlocks
@@ -644,13 +665,14 @@ function Install-All {
   Write-Host "PowerShell profile:"
   Write-Host "  $profilePath"
   Write-Host ""
-  Write-Host "Restart PowerShell or run:"
+  Write-Host "Load devtunnel in this PowerShell session:"
   Write-Host "  . `$PROFILE"
+  Write-Host "Or restart PowerShell before running devtunnel."
   Write-Host ""
   Write-Host "Test commands:"
   Write-Host "  ssh $resolvedHostAlias"
   Write-Host "  devtunnel"
-  Write-Host "  devtunnel -Ports 3000,5173,6006"
+  Write-Host "  devtunnel -Ports $($resolvedPorts -join ',')"
 }
 
 switch ($Action) {
@@ -659,22 +681,11 @@ switch ($Action) {
   }
 
   "remove" {
-    Remove-ProfileBlock
+    Remove-All
+  }
 
-    $shouldRemoveSsh = $RemoveSshBlocks
-
-    if (-not $shouldRemoveSsh -and -not $Yes) {
-      $removeSsh = Read-WithDefault "Also remove devtunnel-managed SSH config blocks? y/n" "n"
-      $shouldRemoveSsh = $removeSsh -in @("y", "Y", "yes", "YES")
-    }
-
-    if ($shouldRemoveSsh) {
-      Remove-AnyDevTunnelSshBlocks
-      Write-Host "devtunnel function and managed SSH blocks removed." -ForegroundColor Green
-    }
-    else {
-      Write-Host "devtunnel function removed. SSH config kept." -ForegroundColor Green
-    }
+  "uninstall" {
+    Remove-All
   }
 
   "reinstall" {

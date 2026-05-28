@@ -25,7 +25,7 @@ README.md
   - IdentityFile
   - 기본 포워딩 포트
 - 재설치 지원
-- 제거 지원
+- 제거 지원 (`remove`, `uninstall`)
 - 여러 포트 동시 포워딩 지원
 - `devtunnel` 도움말 출력 지원
 
@@ -122,6 +122,8 @@ Default ports, comma separated [3000]: 3000,5173,6006
 . $PROFILE
 ```
 
+같은 PowerShell 창에서 바로 `devtunnel`을 쓰려면 이 명령이 필요합니다. 실행하지 않으면 새 함수가 아직 현재 세션에 로드되지 않아 `devtunnel` 명령을 찾을 수 없다고 나옵니다.
+
 ## 사용법
 
 기본 포트로 터널 열기:
@@ -133,6 +135,7 @@ devtunnel
 특정 포트 하나만 열기:
 
 ```powershell
+devtunnel 3000
 devtunnel -Ports 3000
 ```
 
@@ -202,6 +205,12 @@ IP, 기본 포트, SSH user 등을 다시 입력받아 덮어쓰고 싶으면:
 
 ```powershell
 .\devtunnel-manager.ps1 remove
+```
+
+`uninstall`도 같은 동작입니다.
+
+```powershell
+.\devtunnel-manager.ps1 uninstall
 ```
 
 실행 중 다음 질문이 나옵니다.
