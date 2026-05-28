@@ -205,6 +205,28 @@ SSH config는 읽거나 쓰지 않습니다.
 
 ## 문제 해결
 
+### 설치 후 바로 실행했는데 예전 동작이나 이상한 SSH 인자가 나올 때
+
+`install`은 `$PROFILE` 파일을 업데이트하지만, 이미 열려 있는 PowerShell 세션의 함수 메모리를 자동으로 바꾸지는 않습니다. 같은 창에서 바로 쓰려면 profile을 다시 로드하세요.
+
+```powershell
+. $PROFILE
+```
+
+그래도 이전 함수가 실행되는 것 같으면 현재 세션의 함수를 지운 뒤 다시 로드하세요.
+
+```powershell
+Remove-Item function:\devtunnel -ErrorAction SilentlyContinue
+. $PROFILE
+```
+
+예를 들어 아래처럼 `HostAlias`가 빠진 것처럼 보이는 출력이나 `Bad local forwarding specification '.0.0.1:3123'` 오류가 나오면, 대부분 현재 세션에 예전 `devtunnel` 함수가 남아 있는 상태입니다.
+
+```txt
+http://localhost:3123 -> .0.0.1:3123
+Bad local forwarding specification '.0.0.1:3123'
+```
+
 ### `devtunnel` 명령을 찾을 수 없다고 나올 때
 
 PowerShell을 재시작하거나 아래 명령을 실행하세요.
