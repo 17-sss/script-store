@@ -1,0 +1,30 @@
+# agent-heartbeat config
+#
+# The default cron schedule sends once at 08:00, 13:00, 18:00, and 23:00.
+# Run `tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'`
+# to find a pane value for Claude, Codex, or another terminal agent.
+
+[schedule]
+cron=0 8,13,18,23 * * *
+log_path=~/.local/state/agent-heartbeat/agent-heartbeat.log
+
+[message]
+text=5-hour agent heartbeat ping. Please acknowledge and continue the active session if needed.
+prefix_timestamp=true
+
+[target.local-log]
+enabled=true
+type=file
+path=~/.local/state/agent-heartbeat/messages.log
+
+[target.claude-tmux]
+enabled=false
+type=tmux
+pane=claude:0.0
+submit=true
+message=5-hour Claude heartbeat ping. Please acknowledge and keep the active session warm.
+
+[target.codex-command]
+enabled=false
+type=command
+command=printf '%s\n' "$AGENT_MESSAGE"
