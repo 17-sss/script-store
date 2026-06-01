@@ -1,8 +1,10 @@
 # agent-heartbeat config
 #
 # The default cron schedule sends once at 08:00, 13:00, 18:00, and 23:00.
-# Run `tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'`
-# to find a pane value for Claude, Codex, or another terminal agent.
+# Enable target.claude-cli if you want the simple Claude CLI prompt path:
+#   claude -p "$AGENT_MESSAGE"
+# If cron cannot find claude, replace `claude` with the full path from:
+#   command -v claude
 
 [schedule]
 cron=0 8,13,18,23 * * *
@@ -16,6 +18,12 @@ prefix_timestamp=true
 enabled=true
 type=file
 path=~/.local/state/agent-heartbeat/messages.log
+
+[target.claude-cli]
+enabled=false
+type=command
+command=claude -p "$AGENT_MESSAGE"
+message=hello
 
 [target.claude-tmux]
 enabled=false

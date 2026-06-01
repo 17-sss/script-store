@@ -29,13 +29,76 @@ cd linux/agent-heartbeat
 ~/.config/agent-heartbeat/agent-heartbeat.ini
 ```
 
-tmux에서 실행 중인 에이전트 pane 이름을 확인합니다.
+## Claude CLI로 5시간마다 hello 보내기
+
+현재 PC에 `claude`가 설치되어 있고 아래 명령이 동작한다면:
+
+```bash
+claude -p "hello"
+```
+
+설정 파일을 엽니다.
+
+```bash
+nano ~/.config/agent-heartbeat/agent-heartbeat.ini
+```
+
+기본 파일 로그 target은 끄고, `claude-cli` target을 켭니다.
+
+```ini
+[target.local-log]
+enabled=false
+type=file
+path=~/.local/state/agent-heartbeat/messages.log
+
+[target.claude-cli]
+enabled=true
+type=command
+command=claude -p "$AGENT_MESSAGE"
+message=hello
+```
+
+Cron에서 `claude` 경로를 못 찾을 수 있으니, 현재 셸에서 실제 경로를 확인합니다.
+
+```bash
+command -v claude
+```
+
+예를 들어 `/home/pado/.local/bin/claude`가 나오면 설정을 이렇게 바꾸면 됩니다.
+
+```ini
+command=/home/pado/.local/bin/claude -p "$AGENT_MESSAGE"
+```
+
+먼저 수동 실행으로 확인합니다.
+
+```bash
+./agent-heartbeat.sh run --target claude-cli --dry-run
+./agent-heartbeat.sh run --target claude-cli
+```
+
+문제가 없으면 cron을 설치합니다.
+
+```bash
+./agent-heartbeat.sh install
+crontab -l
+```
+
+설치 후 매일 `08:00`, `13:00`, `18:00`, `23:00`에 `claude -p "hello"`가 실행됩니다. 로그는 기본적으로 여기에 남습니다.
+
+```txt
+~/.local/state/agent-heartbeat/agent-heartbeat.log
+```
+
+## tmux로 이미 떠 있는 세션에 보내기
+
+tmux에서 이미 떠 있는 에이전트 pane에 직접 타이핑하고 싶다면 pane 이름을 확인합니다.
 
 ```bash
 tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
 ```
 
-설정 파일에서 사용할 target을 켭니다.
+그 다음 설정 파일에서 tmux target을 켭니다.
 
 ```ini
 [target.claude-tmux]
@@ -81,13 +144,13 @@ crontab -l
 특정 target만 전송:
 
 ```bash
-./agent-heartbeat.sh run --target claude-tmux
+./agent-heartbeat.sh run --target claude-cli
 ```
 
 일회성 메시지로 전송:
 
 ```bash
-./agent-heartbeat.sh run --target claude-tmux --message "ping"
+./agent-heartbeat.sh run --target claude-cli --message "hello"
 ```
 
 cron 블록 미리보기:
@@ -121,6 +184,14 @@ submit=true
 ```
 
 `command`는 `AGENT_TARGET`, `AGENT_MESSAGE` 환경 변수를 넣고 셸 명령을 실행합니다.
+
+```ini
+[target.claude-cli]
+enabled=true
+type=command
+command=claude -p "$AGENT_MESSAGE"
+message=hello
+```
 
 ```ini
 [target.custom-command]
