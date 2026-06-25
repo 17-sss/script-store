@@ -25,16 +25,21 @@ By default, the TUI filters sessions to the current working directory and its ch
 Up/Down or j/k   Move selection
 Tab              Switch active/archived list
 a                Toggle current-cwd/all-cwd filtering
+Space            Toggle selected row
+A                Toggle all visible rows
+C                Clear selection
 /                Search
 r                Resume active session
-b                Archive active session
-u                Unarchive archived session
-d                Delete selected session
+b                Archive selected or cursor session
+u                Unarchive selected or cursor session
+d                Delete selected or cursor session
 R                Refresh
 q                Quit
 ```
 
-Deleting a session requires typing `DELETE <id-prefix>` in the prompt before the tool runs `codex delete <SESSION_UUID> --force`.
+The title bar shows the current selected count. If one or more rows are selected, `b`, `u`, and `d` operate on the selected rows in the current visible list. If nothing is selected, those actions use the cursor row.
+
+Deleting one session requires typing `DELETE <id-prefix>` in the prompt. Deleting multiple selected sessions requires typing `DELETE <count>` before the tool runs `codex delete <SESSION_UUID> --force` for each selected row.
 
 ## Non-interactive list mode
 

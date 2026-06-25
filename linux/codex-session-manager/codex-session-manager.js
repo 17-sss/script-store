@@ -107,11 +107,15 @@ Keys:
   Up/Down or j/k   Move selection
   Tab              Switch active/archived list
   a                Toggle current-cwd/all-cwd filtering
+  Space            Toggle selected row
+  A                Toggle all visible rows
+  C                Clear selection
   /                Search
   r                Resume active session
-  b                Archive active session
-  u                Unarchive archived session
-  d                Delete selected session
+  b                Archive selected or cursor session
+  u                Unarchive selected or cursor session
+  d                Delete selected or cursor session
+  R                Refresh
   q                Quit
 
 Notes:
@@ -158,6 +162,7 @@ async function startTui(options) {
     searching: false,
     status: '',
     suspended: false,
+    selected: new Set(),
     inventory: loadInventory(options),
   };
 
@@ -206,6 +211,7 @@ async function handleKey(state, key) {
     state.view = state.view === 'active' ? 'archived' : 'active';
     state.cursor = 0;
     state.scroll = 0;
+    state.selected.clear();
     state.status = '';
     return;
   }
@@ -214,6 +220,7 @@ async function handleKey(state, key) {
     state.options.showAll = !state.options.showAll;
     state.cursor = 0;
     state.scroll = 0;
+    state.selected.clear();
     state.status = state.options.showAll ? 'Showing all cwd values' : `Filtering under ${state.options.cwd}`;
     return;
   }
@@ -226,13 +233,19 @@ async function handleKey(state, key) {
 
   const entries = currentEntries(state);
   if (entries.length === 0) {
-    if (key === 'r') {
+    if (key === 'R') {
       refresh(state);
     }
     return;
   }
 
-  if (key === '\u001b[A' || key === 'k') {
+  if (key === ' ') {
+    toggleSelected(state);
+  } else if (key === 'A') {
+    toggleAllVisible(state);
+  } else if (key === 'C') {
+    clearSelection(state);
+  } else if (key === '\u001b[A' || key === 'k') {
     moveCursor(state, -1);
   } else if (key === '\u001b[B' || key === 'j') {
     moveCursor(state, 1);
@@ -264,6 +277,7 @@ function handleSearchKey(state, key) {
     state.searching = false;
     state.cursor = 0;
     state.scroll = 0;
+    state.selected.clear();
     state.status = state.query ? `Search: ${state.query}` : '';
     return;
   }
@@ -273,6 +287,7 @@ function handleSearchKey(state, key) {
     state.query = '';
     state.cursor = 0;
     state.scroll = 0;
+    state.selected.clear();
     state.status = 'Search cleared';
     return;
   }
@@ -281,6 +296,7 @@ function handleSearchKey(state, key) {
     state.query = state.query.slice(0, -1);
     state.cursor = 0;
     state.scroll = 0;
+    state.selected.clear();
     return;
   }
 
@@ -288,6 +304,7 @@ function handleSearchKey(state, key) {
     state.query += key;
     state.cursor = 0;
     state.scroll = 0;
+    state.selected.clear();
   }
 }
 
@@ -323,11 +340,12 @@ async function archiveSelected(state) {
     state.status = 'Selected session is already archived';
     return;
   }
-  const entry = selectedEntry(state);
-  if (!entry) {
+  const entries = actionTargetEntries(state);
+  if (entries.length === 0) {
     return;
   }
-  await runCodex(state, ['archive', entry.id], `Archived ${entry.id}`);
+  await runCodexBatch(state, entries, (entry) => ['archive', entry.id], 'Archived');
+  state.selected.clear();
   refresh(state);
 }
 
@@ -336,31 +354,37 @@ async function unarchiveSelected(state) {
     state.status = 'Selected session is already active';
     return;
   }
-  const entry = selectedEntry(state);
-  if (!entry) {
+  const entries = actionTargetEntries(state);
+  if (entries.length === 0) {
     return;
   }
-  await runCodex(state, ['unarchive', entry.id], `Unarchived ${entry.id}`);
+  await runCodexBatch(state, entries, (entry) => ['unarchive', entry.id], 'Unarchived');
+  state.selected.clear();
   refresh(state);
 }
 
 async function deleteSelected(state) {
-  const entry = selectedEntry(state);
-  if (!entry) {
+  const entries = actionTargetEntries(state);
+  if (entries.length === 0) {
     return;
   }
 
+  const prompt = entries.length === 1
+    ? `Type DELETE ${entries[0].id.slice(0, 8)} to permanently delete ${entries[0].id}: `
+    : `Type DELETE ${entries.length} to permanently delete ${entries.length} selected sessions: `;
   const answer = await promptLine(
     state,
-    `Type DELETE ${entry.id.slice(0, 8)} to permanently delete ${entry.id}: `
+    prompt
   );
 
-  if (answer.trim() !== `DELETE ${entry.id.slice(0, 8)}`) {
+  const expected = entries.length === 1 ? `DELETE ${entries[0].id.slice(0, 8)}` : `DELETE ${entries.length}`;
+  if (answer.trim() !== expected) {
     state.status = 'Delete cancelled';
     return;
   }
 
-  await runCodex(state, ['delete', entry.id, '--force'], `Deleted ${entry.id}`);
+  await runCodexBatch(state, entries, (entry) => ['delete', entry.id, '--force'], 'Deleted');
+  state.selected.clear();
   refresh(state);
 }
 
@@ -371,6 +395,29 @@ async function runCodex(state, args, successMessage) {
   const result = spawnSync('codex', args, {stdio: 'inherit'});
   resumeTui(state);
   state.status = result.status === 0 ? successMessage : `codex ${args[0]} failed with exit code ${result.status}`;
+}
+
+async function runCodexBatch(state, entries, argsForEntry, verb) {
+  suspendTui(state);
+  console.log('');
+
+  let succeeded = 0;
+  let failed = 0;
+  for (const entry of entries) {
+    const args = argsForEntry(entry);
+    console.log(`$ codex ${args.join(' ')}`);
+    const result = spawnSync('codex', args, {stdio: 'inherit'});
+    if (result.status === 0) {
+      succeeded += 1;
+    } else {
+      failed += 1;
+    }
+  }
+
+  resumeTui(state);
+  state.status = failed === 0
+    ? `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}`
+    : `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}, ${failed} failed`;
 }
 
 async function promptLine(state, prompt) {
@@ -404,6 +451,7 @@ function resumeTui(state) {
 
 function refresh(state) {
   state.inventory = loadInventory(state.options);
+  pruneSelection(state);
   state.cursor = clamp(state.cursor, 0, Math.max(currentEntries(state).length - 1, 0));
   ensureCursorVisible(state);
 }
@@ -430,72 +478,145 @@ function restoreTerminal() {
 function render(state) {
   const cols = process.stdout.columns || 100;
   const rows = process.stdout.rows || 30;
+  const width = Math.max(1, cols - 1);
   const entries = currentEntries(state);
+  const selectedCount = selectedEntries(state).length;
   const height = listHeight();
   state.cursor = clamp(state.cursor, 0, Math.max(entries.length - 1, 0));
   ensureCursorVisible(state);
 
-  process.stdout.write('\x1b[2J\x1b[H');
+  const lines = [];
 
   const scope = state.options.showAll ? 'all cwd' : `cwd: ${state.options.cwd}`;
-  const title = `${APP_NAME}  ${state.view} (${entries.length})  ${scope}`;
-  console.log(color(title, 'bold'));
-  console.log(dim('Tab switch  a cwd/all  / search  r resume  b archive  u unarchive  d delete  R refresh  q quit'));
+  const title = `${APP_NAME}  ${state.view} (${entries.length})  selected ${selectedCount}  ${scope}`;
+  lines.push(color(truncate(title, width), 'bold'));
+  lines.push(dim(truncate('Tab view  a scope  Space mark  A all  C clear  / find  b/u/d action  R refresh  q quit', width)));
 
   const queryLine = state.searching
     ? `search: ${state.query}_`
     : state.query
       ? `search: ${state.query}`
       : '';
-  console.log(dim(queryLine || ''));
+  lines.push(dim(truncate(queryLine || '', width)));
 
   const start = state.scroll;
   const visible = entries.slice(start, start + height);
   for (let index = 0; index < height; index += 1) {
     const entry = visible[index];
     if (!entry) {
-      console.log('');
+      lines.push('');
       continue;
     }
 
     const actualIndex = start + index;
-    const line = formatTuiLine(entry, state.options.cwd, cols - 1);
+    const line = formatTuiLine(entry, state.options.cwd, width, state.selected.has(entry.id));
     if (actualIndex === state.cursor) {
-      console.log(color(line, 'inverse'));
+      lines.push(color(line, 'inverse'));
     } else {
-      console.log(line);
+      lines.push(line);
     }
   }
 
   const selected = entries[state.cursor];
-  console.log(dim(''.padEnd(cols, '-').slice(0, cols)));
+  lines.push(dim(''.padEnd(width, '-').slice(0, width)));
   if (selected) {
-    console.log(truncate(`id: ${selected.id}  source: ${selected.source}  time: ${formatDate(selected.time)}`, cols));
-    console.log(truncate(`cwd: ${selected.cwd || '(unknown)'}`, cols));
-    console.log(truncate(`file: ${selected.file}`, cols));
-    console.log(truncate(`prompt: ${selected.summary}`, cols));
+    lines.push(truncate(`id: ${selected.id}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
+    lines.push(truncate(`cwd: ${selected.cwd || '(unknown)'}`, width));
+    lines.push(truncate(`file: ${selected.file}`, width));
+    lines.push(truncate(`prompt: ${selected.summary}`, width));
   } else {
-    console.log('No sessions in this view.');
-    console.log('');
-    console.log('');
-    console.log('');
+    lines.push('No sessions in this view.');
+    lines.push('');
+    lines.push('');
+    lines.push('');
   }
 
   const status = state.status || `${state.view} directory: ${state.view === 'active' ? sessionsDir(state.options) : archivedDir(state.options)}`;
-  console.log(color(truncate(status, cols), status.toLowerCase().includes('failed') ? 'red' : 'green'));
-
-  if (rows < 14) {
-    console.log(dim('Terminal is short; resize for details.'));
-  }
+  lines.push(color(truncate(status, width), status.toLowerCase().includes('failed') ? 'red' : 'green'));
+  writeFrame(lines, rows);
 }
 
 function listHeight() {
   const rows = process.stdout.rows || 30;
-  return Math.max(5, rows - 9);
+  return Math.max(1, rows - 9);
+}
+
+function writeFrame(lines, rows) {
+  const chunks = ['\x1b[H'];
+  for (let index = 0; index < rows; index += 1) {
+    chunks.push('\x1b[2K');
+    if (index < lines.length) {
+      chunks.push(lines[index]);
+    }
+    if (index < rows - 1) {
+      chunks.push('\n');
+    }
+  }
+  process.stdout.write(chunks.join(''));
 }
 
 function selectedEntry(state) {
   return currentEntries(state)[state.cursor];
+}
+
+function selectedEntries(state) {
+  return currentEntries(state).filter((entry) => state.selected.has(entry.id));
+}
+
+function actionTargetEntries(state) {
+  const entries = selectedEntries(state);
+  const entry = selectedEntry(state);
+  return entries.length > 0 ? entries : (entry ? [entry] : []);
+}
+
+function toggleSelected(state) {
+  const entry = selectedEntry(state);
+  if (!entry) {
+    return;
+  }
+
+  if (state.selected.has(entry.id)) {
+    state.selected.delete(entry.id);
+    state.status = `Unselected ${entry.id}`;
+  } else {
+    state.selected.add(entry.id);
+    state.status = `Selected ${entry.id}`;
+  }
+}
+
+function toggleAllVisible(state) {
+  const entries = currentEntries(state);
+  if (entries.length === 0) {
+    return;
+  }
+
+  const allSelected = entries.every((entry) => state.selected.has(entry.id));
+  if (allSelected) {
+    for (const entry of entries) {
+      state.selected.delete(entry.id);
+    }
+    state.status = `Unselected ${entries.length} visible sessions`;
+  } else {
+    for (const entry of entries) {
+      state.selected.add(entry.id);
+    }
+    state.status = `Selected ${entries.length} visible sessions`;
+  }
+}
+
+function clearSelection(state) {
+  const count = state.selected.size;
+  state.selected.clear();
+  state.status = `Cleared ${count} selected session${count === 1 ? '' : 's'}`;
+}
+
+function pruneSelection(state) {
+  const visibleIds = new Set(currentEntries(state).map((entry) => entry.id));
+  for (const id of state.selected) {
+    if (!visibleIds.has(id)) {
+      state.selected.delete(id);
+    }
+  }
 }
 
 function currentEntries(state) {
@@ -771,8 +892,9 @@ function formatPlainLine(entry, cwd) {
   ].join('  ');
 }
 
-function formatTuiLine(entry, cwd, width) {
+function formatTuiLine(entry, cwd, width, selected) {
   const fields = [
+    selected ? '[x]' : '[ ]',
     formatDate(entry.time),
     entry.id.slice(0, 8),
     fixed(entry.source, 18),
@@ -816,7 +938,7 @@ function formatDate(value) {
 
 function fixed(value, width) {
   const plain = truncatePlain(value || '', width);
-  return plain.padEnd(width, ' ');
+  return `${plain}${' '.repeat(Math.max(width - displayWidth(plain), 0))}`;
 }
 
 function truncate(value, width) {
@@ -825,16 +947,66 @@ function truncate(value, width) {
 
 function truncatePlain(value, width) {
   const text = String(value || '').replace(/\s+/g, ' ');
-  if (text.length <= width) {
+  if (displayWidth(text) <= width) {
     return text;
   }
   if (width <= 1) {
-    return text.slice(0, width);
+    return '.'.repeat(width);
   }
   if (width <= 3) {
     return '.'.repeat(width);
   }
-  return `${text.slice(0, width - 3)}...`;
+
+  const suffix = '...';
+  const limit = width - displayWidth(suffix);
+  let used = 0;
+  let output = '';
+  for (const char of text) {
+    const charWidthValue = charWidth(char);
+    if (used + charWidthValue > limit) {
+      break;
+    }
+    output += char;
+    used += charWidthValue;
+  }
+  return `${output}${suffix}`;
+}
+
+function displayWidth(value) {
+  let width = 0;
+  for (const char of String(value || '')) {
+    width += charWidth(char);
+  }
+  return width;
+}
+
+function charWidth(char) {
+  const code = char.codePointAt(0);
+  if (!code || code === 0) {
+    return 0;
+  }
+  if (code < 32 || (code >= 0x7f && code < 0xa0)) {
+    return 0;
+  }
+  if (
+    code >= 0x1100 && (
+      code <= 0x115f ||
+      code === 0x2329 ||
+      code === 0x232a ||
+      (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f300 && code <= 0x1f64f) ||
+      (code >= 0x1f900 && code <= 0x1f9ff)
+    )
+  ) {
+    return 2;
+  }
+  return 1;
 }
 
 function clamp(value, min, max) {
