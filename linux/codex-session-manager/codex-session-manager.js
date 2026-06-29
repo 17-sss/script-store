@@ -21,6 +21,7 @@ const colors = {
   yellow: '\x1b[33m',
   red: '\x1b[31m',
 };
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
 let terminalTouched = false;
 
 function main() {
@@ -369,23 +370,36 @@ async function deleteSelected(state) {
     return;
   }
 
-  const prompt = entries.length === 1
-    ? `Type DELETE ${entries[0].id.slice(0, 8)} to permanently delete ${entries[0].id}: `
-    : `Type DELETE ${entries.length} to permanently delete ${entries.length} selected sessions: `;
-  const answer = await promptLine(
-    state,
-    prompt
-  );
+  const expected = deleteConfirmationText(entries);
+  const answer = await promptLine(state, deleteConfirmationPrompt(entries, expected));
 
-  const expected = entries.length === 1 ? `DELETE ${entries[0].id.slice(0, 8)}` : `DELETE ${entries.length}`;
   if (answer.trim() !== expected) {
-    state.status = 'Delete cancelled';
+    state.status = `Delete cancelled. Required input was ${expected}`;
     return;
   }
 
   await runCodexBatch(state, entries, (entry) => ['delete', entry.id, '--force'], 'Deleted');
   state.selected.clear();
   refresh(state);
+}
+
+function deleteConfirmationText(entries) {
+  return entries.length === 1
+    ? `DELETE ${entries[0].id.slice(0, 8)}`
+    : `DELETE ${entries.length}`;
+}
+
+function deleteConfirmationPrompt(entries, expected) {
+  const target = entries.length === 1
+    ? entries[0].id
+    : `${entries.length} selected sessions`;
+  return [
+    danger('Permanent delete confirmation'),
+    `${strong('Target:')} ${target}`,
+    `${strong('Required input:')} ${requiredInput(expected)}`,
+    dim('This will run codex delete --force for the target session(s).'),
+    `${keyText('> ')}`
+  ].join('\n');
 }
 
 async function runCodex(state, args, successMessage) {
@@ -487,17 +501,23 @@ function render(state) {
 
   const lines = [];
 
-  const scope = state.options.showAll ? 'all cwd' : `cwd: ${state.options.cwd}`;
-  const title = `${APP_NAME}  ${state.view} (${entries.length})  selected ${selectedCount}  ${scope}`;
-  lines.push(color(truncate(title, width), 'bold'));
-  lines.push(dim(truncate('Tab view  a scope  Space mark  A all  C clear  / find  b/u/d action  R refresh  q quit', width)));
+  const scope = state.options.showAll ? 'all folders' : 'current folder';
+  const title = [
+    strong(APP_NAME),
+    `View: ${valueText(state.view)}`,
+    `Scope: ${valueText(scope)}`,
+    `Marked: ${selectedCount > 0 ? warningText(String(selectedCount)) : '0'}`,
+    `Sessions: ${entries.length}`,
+  ].join(' | ');
+  lines.push(truncateStyled(title, width));
 
-  const queryLine = state.searching
-    ? `search: ${state.query}_`
-    : state.query
-      ? `search: ${state.query}`
-      : '';
-  lines.push(dim(truncate(queryLine || '', width)));
+  if (state.searching) {
+    lines.push(truncateStyled(`Search: ${warningText(`${state.query}_`)} | ${keyText('Enter')}=apply filter | ${keyText('Esc')}=clear search`, width));
+    lines.push(truncateStyled(`${strong('Tip:')} search applies after Enter; press Esc to return to the list`, width));
+  } else {
+    lines.push(truncateStyled(`Move: ${keyText('Up/Down,j/k')} | ${keyText('Tab')}=list | ${keyText('a')}=scope | ${keyText('/')}=search | ${keyText('R')}=refresh | ${keyText('q')}=quit`, width));
+    lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${danger('d')}=del`, width));
+  }
 
   const start = state.scroll;
   const visible = entries.slice(start, start + height);
@@ -532,8 +552,28 @@ function render(state) {
   }
 
   const status = state.status || `${state.view} directory: ${state.view === 'active' ? sessionsDir(state.options) : archivedDir(state.options)}`;
-  lines.push(color(truncate(status, width), status.toLowerCase().includes('failed') ? 'red' : 'green'));
+  lines.push(color(truncate(status, width), statusColor(status)));
   writeFrame(lines, rows);
+}
+
+function statusColor(status) {
+  const normalized = status.toLowerCase();
+  if (normalized.includes('failed') || normalized.startsWith('delete cancelled')) {
+    return 'red';
+  }
+  if (
+    normalized.includes('cancelled') ||
+    normalized.includes('selected') ||
+    normalized.includes('unselected') ||
+    normalized.includes('cleared') ||
+    normalized.includes('search') ||
+    normalized.includes('showing') ||
+    normalized.includes('filtering') ||
+    normalized.includes('already')
+  ) {
+    return 'yellow';
+  }
+  return 'green';
 }
 
 function listHeight() {
@@ -945,6 +985,45 @@ function truncate(value, width) {
   return truncatePlain(value, width);
 }
 
+function truncateStyled(value, width) {
+  const text = String(value || '').replace(/\s+/g, ' ');
+  if (displayWidth(stripAnsi(text)) <= width) {
+    return text;
+  }
+  if (width <= 1) {
+    return '.'.repeat(width);
+  }
+  if (width <= 3) {
+    return '.'.repeat(width);
+  }
+
+  const suffix = '...';
+  const limit = width - displayWidth(suffix);
+  let used = 0;
+  let output = '';
+  for (let index = 0; index < text.length;) {
+    if (text[index] === '\x1b') {
+      const match = text.slice(index).match(/^\x1b\[[0-9;]*[A-Za-z]/);
+      if (match) {
+        output += match[0];
+        index += match[0].length;
+        continue;
+      }
+    }
+
+    const codePoint = text.codePointAt(index);
+    const char = String.fromCodePoint(codePoint);
+    const widthValue = charWidth(char);
+    if (used + widthValue > limit) {
+      break;
+    }
+    output += char;
+    used += widthValue;
+    index += char.length;
+  }
+  return `${output}${output.includes('\x1b') ? colors.reset : ''}${suffix}`;
+}
+
 function truncatePlain(value, width) {
   const text = String(value || '').replace(/\s+/g, ' ');
   if (displayWidth(text) <= width) {
@@ -1009,19 +1088,56 @@ function charWidth(char) {
   return 1;
 }
 
+function stripAnsi(value) {
+  return String(value || '').replace(ANSI_RE, '');
+}
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
 function color(value, name) {
+  return paint(value, name);
+}
+
+function paint(value, ...names) {
   if (!process.stdout.isTTY || process.env.NO_COLOR) {
     return value;
   }
-  return `${colors[name] || ''}${value}${colors.reset}`;
+  const prefix = names.map((name) => colors[name] || '').join('');
+  return `${prefix}${value}${colors.reset}`;
 }
 
 function dim(value) {
   return color(value, 'dim');
+}
+
+function strong(value) {
+  return paint(value, 'bold');
+}
+
+function keyText(value) {
+  return paint(value, 'bold', 'cyan');
+}
+
+function valueText(value) {
+  return paint(value, 'cyan');
+}
+
+function warningText(value) {
+  return paint(value, 'bold', 'yellow');
+}
+
+function successText(value) {
+  return paint(value, 'bold', 'green');
+}
+
+function requiredInput(value) {
+  return warningText(value);
+}
+
+function danger(value) {
+  return paint(value, 'bold', 'red');
 }
 
 process.on('exit', restoreTerminal);

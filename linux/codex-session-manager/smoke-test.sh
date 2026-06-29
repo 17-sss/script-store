@@ -43,7 +43,11 @@ if command -v script >/dev/null 2>&1; then
   tui_log="$TMP_DIR/tui.log"
   { printf 'A'; sleep 0.2; printf 'q'; } \
     | script -q -e -O "$tui_log" -c "stty cols 80 rows 20; CODEX_HOME=$TMP_DIR $SCRIPT_DIR/codex-session-manager.js --cwd /tmp/project" >/dev/null
-  tr -d '\r' < "$tui_log" | grep -q "selected 2"
+  clean_tui="$(tr -d '\r' < "$tui_log" | sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g')"
+  printf '%s\n' "$clean_tui" | grep -q "Marked: 2"
+  printf '%s\n' "$clean_tui" | grep -q "Move: Up/Down,j/k"
+  printf '%s\n' "$clean_tui" | grep -q "Act marked/cursor: b=archive"
+  LC_ALL=C grep -q "$(printf '\033')\\[31m" "$tui_log"
   if LC_ALL=C grep -q "$(printf '\033')\\[2J" "$tui_log"; then
     printf 'unexpected full-screen clear escape in TUI render\n' >&2
     exit 1
