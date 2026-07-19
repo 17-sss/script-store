@@ -4,7 +4,7 @@
 
 - 제품명: OMX Guard
 - 유형: Bash 기반 로컬 CLI 유틸리티
-- 버전: 2.1.0
+- 버전: 2.1.1
 - 대상 운영체제: macOS, Linux
 - 주요 사용자: Codex CLI와 Oh My Codex(OMX)를 개인 또는 원격 개발 환경에서 사용하는 개발자
 
@@ -104,6 +104,7 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - 각 추적 경로의 존재 여부 저장
 - 파일, 디렉터리, 심볼릭 링크를 구분하여 복사
 - 플랫폼, 홈 경로, Codex 홈, OMX 설치 여부를 manifest에 저장
+- 활성 여부와 관계없이 발견한 OMX 패키지 및 실행 파일의 정확한 경로를 manifest에 저장
 - `--project`를 반복해서 받을 수 있음
 - 백업 권한은 현재 사용자에게 제한
 
@@ -112,7 +113,7 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 `remove`는 다음을 수행해야 한다.
 
 - 기본적으로 제거 전 스냅샷 생성
-- NVM, fnm, Volta 및 일반적인 npm 전역 경로 탐색
+- NVM, fnm, Volta, Homebrew/Linuxbrew 및 일반적인 npm 전역 경로 탐색
 - `oh-my-codex` 패키지와 연관된 `omx` 실행 파일 제거
 - TOML의 명백한 OMX 섹션 제거
 - OMX 전용 주석 및 삭제된 패키지 경로 참조 제거
@@ -129,8 +130,12 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - 스냅샷의 `existed=false` 경로는 현재 환경에서 제거
 - 스냅샷의 `existed=true` 경로는 보관본으로 완전 교체
 - 복구 후 TOML 문법 검사
-- OMX 미설치 스냅샷을 복구할 때 현재 OMX 설치 제거
-- OMX 설치 스냅샷의 패키지는 자동 재설치하지 않고 경고
+- 스냅샷 이후 새로 발견된 OMX 패키지 및 실행 파일만 제거
+- 스냅샷 당시 비활성 Node 버전에 존재하던 OMX 설치 경로 보존
+- 스냅샷과 현재 실행에서 공통으로 탐색한 루트 안의 신규 경로만 제거
+- 스냅샷 이후 처음 노출된 탐색 루트의 경로는 보존하고 경고
+- 정확한 설치 경로가 없는 이전 manifest에서는 npm 패키지 제거를 보수적으로 건너뜀
+- OMX 설치 스냅샷의 패키지 내용이나 버전은 자동 복원하지 않음
 
 ### FR-5 스냅샷 관리
 
@@ -152,7 +157,7 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 
 ### NFR-2 이식성
 
-- macOS 기본 Bash와 일반 Linux Bash에서 실행 가능해야 함
+- macOS 기본 Bash 3.2와 일반 Linux Bash에서 `nounset` 빈 인자 오류 없이 실행 가능해야 함
 - Python 3.8 이상 사용
 - GNU 전용 `readlink -f`, `sed -i`, `mapfile`에 의존하지 않음
 - 경로 처리는 Python `pathlib`을 우선 사용
@@ -198,7 +203,16 @@ manifest 주요 필드:
     "command_path": null,
     "installed": false,
     "installed_version": null,
-    "npm_prefix": null
+    "npm_prefix": null,
+    "discovery": {
+      "schema_version": 1,
+      "active_command": null,
+      "packages": [],
+      "binary_only": [],
+      "removable_paths": [],
+      "scan_roots": [],
+      "path_roots": {}
+    }
   },
   "entries": [
     {
@@ -217,6 +231,10 @@ manifest 주요 필드:
 - 빈 임시 `HOME`에서도 `status`, `snapshot`, `list`가 실패하지 않는다.
 - 개인 설정을 스냅샷한 뒤 파일을 변조하고 `restore`하면 원본 내용이 복원된다.
 - 스냅샷 당시 없던 OMX 파일은 `restore` 후 제거된다.
+- 스냅샷 당시 비활성 Node 버전에 있던 OMX 설치는 `restore` 후 보존된다.
+- OMX와 무관한 동명의 `omx` 실행 파일은 제거하지 않는다.
+- 로컬 소스 체크아웃의 `node_modules/oh-my-codex`는 전역 탐색 루트 밖이면 제거하지 않는다.
+- 스냅샷 이후 처음 노출된 Node 관리자/npm 루트의 설치는 제거하지 않는다.
 - 프로젝트를 지정한 스냅샷은 프로젝트 `.codex`를 복원하고 `.omx` 존재 상태를 되돌린다.
 - `remove`는 명백한 `mcp_servers.omx_*`를 제거하지만 개인 MCP 설정은 보존한다.
 - `remove`는 legacy agent 옵션을 자동 삭제하지 않는다.
@@ -224,6 +242,8 @@ manifest 주요 필드:
 - 스냅샷 루트 밖 경로나 변조된 manifest의 허용되지 않은 복구 경로는 거부된다.
 - 스냅샷 루트 바깥 경로는 `delete-snapshot`으로 삭제할 수 없다.
 - 실제 사용자 홈이 아닌 임시 환경에서 통합 테스트가 수행된다.
+- 프로젝트 경로를 지정하지 않은 `snapshot`, `restore`, `remove`가 Bash 3.2에서 성공한다.
+- NVM/fnm/Volta의 기본, XDG, macOS 및 사용자 지정 홈 경로를 탐색한다.
 
 ## 11. 테스트 계획
 
@@ -245,10 +265,21 @@ shellcheck omx-guard.sh
 
 ```bash
 TMP_ROOT="$(mktemp -d)"
+ISOLATED_BIN="$TMP_ROOT/bin"
+mkdir -p "$ISOLATED_BIN"
+for command_name in bash python3 uname mktemp rm mkdir grep basename; do
+  ln -s "$(command -v "$command_name")" "$ISOLATED_BIN/$command_name"
+done
 export HOME="$TMP_ROOT/home"
 export CODEX_HOME="$HOME/.codex"
 export OMX_GUARD_STATE_HOME="$TMP_ROOT/state"
-export OMX_GUARD_NPM_PREFIXES="$TMP_ROOT/npm-prefixes"
+export OMX_GUARD_NPM_PREFIXES="$TMP_ROOT/npm-prefix"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export NVM_DIR="$HOME/.nvm"
+export FNM_DIR="$XDG_DATA_HOME/fnm"
+export VOLTA_HOME="$HOME/.volta"
+export PATH="$ISOLATED_BIN"
 ```
 
 테스트 `PATH`에서는 실제 `npm`과 `omx`를 노출하지 않는다.
@@ -263,6 +294,10 @@ export OMX_GUARD_NPM_PREFIXES="$TMP_ROOT/npm-prefixes"
 6. 원본 개인 설정 복원 확인
 7. 스냅샷 당시 없던 OMX 파일 제거 확인
 8. 변조된 manifest가 스냅샷 추적 대상 밖의 파일을 삭제하지 못하는지 확인
+9. Bash 3.2에서 프로젝트 인자 없는 `snapshot`, `restore`, `remove` 확인
+10. Linux/macOS의 NVM, fnm, Volta 및 npm prefix 변형 제거 확인
+11. 스냅샷 당시 비활성 OMX 설치 및 무관한 동명 실행 파일 보존 확인
+12. 새로 노출된 탐색 루트와 로컬 소스 체크아웃 보존 확인
 
 ## 12. 향후 개선 후보
 

@@ -2,13 +2,13 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="2.1.0"
+VERSION="2.1.1"
 OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
 HOME_DIR="${HOME:?HOME is not set}"
 CODEX_HOME="${CODEX_HOME:-$HOME_DIR/.codex}"
 STATE_ROOT="${OMX_GUARD_STATE_HOME:-${XDG_STATE_HOME:-$HOME_DIR/.local/state}/omx-guard}"
 SNAPSHOT_ROOT="$STATE_ROOT/snapshots"
-NPM_PREFIXES="${OMX_GUARD_NPM_PREFIXES:-/usr/local:/opt/homebrew:/usr}"
+NPM_PREFIXES="${OMX_GUARD_NPM_PREFIXES:-/usr/local:/opt/homebrew:/home/linuxbrew/.linuxbrew:/usr}"
 
 blue()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
@@ -95,15 +95,278 @@ PY
   done
 }
 
+snapshot_from_project_file() {
+  local label="$1"
+  local project_file="$2"
+  local project
+
+  # Positional parameters remain safe when empty under macOS Bash 3.2 + nounset.
+  set --
+  while IFS= read -r project; do
+    [[ -n "$project" ]] || continue
+    set -- "$@" --project "$project"
+  done < "$project_file"
+
+  snapshot_create "$label" "$@"
+}
+
+discover_omx_installations() {
+  HOME_DIR="$HOME_DIR" NPM_PREFIXES="$NPM_PREFIXES" python3 <<'PY'
+from pathlib import Path
+import json
+import os
+import shutil
+import subprocess
+
+home = Path(os.environ["HOME_DIR"]).expanduser().resolve()
+package_candidates = {}
+candidate_roots = {}
+scan_roots = set()
+
+def normalize(path):
+    return Path(os.path.abspath(str(path.expanduser())))
+
+def add_scan_root(path):
+    path = normalize(path)
+    scan_roots.add(path)
+    return path
+
+def add_candidate(package, *bins, scan_root):
+    package = normalize(package)
+    root = normalize(scan_root)
+    normalized_bins = {normalize(binary) for binary in bins}
+    package_candidates.setdefault(package, set()).update(normalized_bins)
+    candidate_roots.setdefault(package, set()).add(root)
+    for binary in normalized_bins:
+        candidate_roots.setdefault(binary, set()).add(root)
+
+def unique_paths(*paths):
+    result = []
+    seen = set()
+    for path in paths:
+        if path is None:
+            continue
+        path = normalize(path)
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+def env_path(name):
+    raw = os.environ.get(name)
+    return Path(raw) if raw else None
+
+xdg_config_home = env_path("XDG_CONFIG_HOME")
+for nvm_root in unique_paths(
+    home / ".nvm",
+    xdg_config_home / "nvm" if xdg_config_home else None,
+    env_path("NVM_DIR"),
+):
+    add_scan_root(nvm_root)
+    for node_dir in (nvm_root / "versions" / "node").glob("*"):
+        add_candidate(
+            node_dir / "lib" / "node_modules" / "oh-my-codex",
+            node_dir / "bin" / "omx",
+            scan_root=nvm_root,
+        )
+
+xdg_data_home = env_path("XDG_DATA_HOME")
+for fnm_root in unique_paths(
+    home / ".local" / "share" / "fnm",
+    home / "Library" / "Application Support" / "fnm",
+    xdg_data_home / "fnm" if xdg_data_home else None,
+    env_path("FNM_DIR"),
+):
+    add_scan_root(fnm_root)
+    for install in (fnm_root / "node-versions").glob("*/installation"):
+        add_candidate(
+            install / "lib" / "node_modules" / "oh-my-codex",
+            install / "bin" / "omx",
+            scan_root=fnm_root,
+        )
+
+for volta_root in unique_paths(home / ".volta", env_path("VOLTA_HOME")):
+    add_scan_root(volta_root)
+    add_candidate(
+        volta_root / "tools" / "image" / "packages" / "oh-my-codex",
+        volta_root / "bin" / "omx",
+        scan_root=volta_root,
+    )
+
+prefixes = [home / ".npm-global"]
+prefixes.extend(
+    Path(raw)
+    for raw in os.environ["NPM_PREFIXES"].split(os.pathsep)
+    if raw
+)
+for prefix in unique_paths(*prefixes):
+    add_scan_root(prefix)
+    add_candidate(
+        prefix / "lib" / "node_modules" / "oh-my-codex",
+        prefix / "bin" / "omx",
+        scan_root=prefix,
+    )
+
+# Ask npm for its active global layout, but never let a broken npm block guard.
+for command in (["npm", "prefix", "-g"], ["npm", "root", "-g"]):
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        continue
+    value = result.stdout.strip()
+    if not value:
+        continue
+    path = normalize(Path(value))
+    if command[1] == "root":
+        prefix = add_scan_root(path.parent.parent)
+        add_candidate(
+            path / "oh-my-codex",
+            prefix / "bin" / "omx",
+            scan_root=prefix,
+        )
+    else:
+        add_scan_root(path)
+        add_candidate(
+            path / "lib" / "node_modules" / "oh-my-codex",
+            path / "bin" / "omx",
+            scan_root=path,
+        )
+
+active_command = shutil.which("omx")
+active_path = normalize(Path(active_command)) if active_command else None
+if active_path is not None:
+    try:
+        resolved = active_path.resolve()
+        for parent in [resolved, *resolved.parents]:
+            package_json = parent / "package.json"
+            if not package_json.is_file():
+                continue
+            try:
+                data = json.loads(package_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            is_package_boundary = (
+                parent.name == "oh-my-codex"
+                and parent.parent.name == "node_modules"
+            )
+            if (
+                data.get("name") == "oh-my-codex"
+                and is_package_boundary
+                and parent in package_candidates
+            ):
+                package_candidates[parent].add(active_path)
+                candidate_roots.setdefault(active_path, set()).update(
+                    candidate_roots[parent]
+                )
+                break
+    except OSError:
+        pass
+
+packages = []
+removable_paths = set()
+paired_binary_paths = set()
+installed_version = None
+npm_prefix = None
+
+for package, bins in sorted(package_candidates.items(), key=lambda item: str(item[0])):
+    if not (package.exists() or package.is_symlink()):
+        continue
+    version = None
+    package_json_candidates = [
+        package / "package.json",
+        package / "lib" / "node_modules" / "oh-my-codex" / "package.json",
+    ]
+    for package_json in package_json_candidates:
+        if not package_json.is_file():
+            continue
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            if data.get("name") in {None, "oh-my-codex"}:
+                version = data.get("version")
+        except (OSError, json.JSONDecodeError):
+            pass
+        if version is not None:
+            break
+    present_bins = sorted(
+        str(binary)
+        for binary in bins
+        if binary.exists() or binary.is_symlink()
+    )
+    packages.append({
+        "path": str(package),
+        "binary_paths": present_bins,
+        "version": version,
+    })
+    removable_paths.add(str(package))
+    removable_paths.update(present_bins)
+    paired_binary_paths.update(present_bins)
+    if installed_version is None and version is not None:
+        installed_version = version
+    parts = package.parts
+    if npm_prefix is None and len(parts) >= 4 and parts[-3:-1] == ("lib", "node_modules"):
+        npm_prefix = str(package.parents[2])
+
+binary_only = []
+all_binary_candidates = {
+    binary
+    for bins in package_candidates.values()
+    for binary in bins
+}
+
+for binary in sorted(all_binary_candidates, key=str):
+    binary_text = str(binary)
+    if binary_text in paired_binary_paths:
+        continue
+    if not (binary.exists() or binary.is_symlink()):
+        continue
+    try:
+        resolved = binary.resolve()
+        belongs_to_omx = "oh-my-codex" in resolved.parts
+    except OSError:
+        belongs_to_omx = False
+    if belongs_to_omx:
+        binary_only.append(binary_text)
+        removable_paths.add(binary_text)
+
+result = {
+    "schema_version": 1,
+    "active_command": str(active_path) if active_path is not None else None,
+    "installed": bool(packages or binary_only),
+    "installed_version": installed_version,
+    "npm_prefix": npm_prefix,
+    "packages": packages,
+    "binary_only": binary_only,
+    "removable_paths": sorted(removable_paths),
+    "scan_roots": sorted(str(root) for root in scan_roots),
+    "path_roots": {
+        path: sorted(str(root) for root in candidate_roots[Path(path)])
+        for path in sorted(removable_paths)
+    },
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))
+PY
+}
+
 snapshot_create() {
   require_python
 
   local label="${1:-manual}"
   if [[ $# -gt 0 ]]; then shift; fi
 
-  local project_file
+  local project_file discovery_file
   project_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-projects.XXXXXX")"
+  discovery_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-discovery.XXXXXX")"
   make_project_file "$project_file" "$@"
+  discover_omx_installations > "$discovery_file"
 
   label="$(sanitize_label "$label")"
   mkdir -p "$SNAPSHOT_ROOT"
@@ -115,6 +378,7 @@ snapshot_create() {
   SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
   SNAPSHOT_LABEL="$label" \
   PROJECT_FILE="$project_file" \
+  OMX_DISCOVERY_FILE="$discovery_file" \
   OS_NAME="$OS_NAME" \
   python3 <<'PY'
 from __future__ import annotations
@@ -126,7 +390,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 import sys
 
 home = Path(os.environ["HOME_DIR"]).expanduser().resolve()
@@ -134,6 +397,7 @@ codex_home = Path(os.environ["CODEX_HOME"]).expanduser().resolve()
 snapshot_root = Path(os.environ["SNAPSHOT_ROOT"]).expanduser().resolve()
 label = os.environ["SNAPSHOT_LABEL"]
 project_file = Path(os.environ["PROJECT_FILE"])
+discovery_file = Path(os.environ["OMX_DISCOVERY_FILE"])
 
 stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 snapshot_id = f"{stamp}-{label}"
@@ -213,27 +477,9 @@ for index, path in enumerate(unique_tracked):
         entry["kind"] = kind
     entries.append(entry)
 
-omx_path = shutil.which("omx")
-installed_version = None
-npm_prefix = None
-
-if omx_path:
-    try:
-        resolved = Path(omx_path).resolve()
-        for parent in [resolved, *resolved.parents]:
-            package_json = parent / "package.json"
-            if not package_json.is_file():
-                continue
-            try:
-                package = json.loads(package_json.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if package.get("name") == "oh-my-codex":
-                installed_version = package.get("version")
-                npm_prefix = str(parent.parent.parent) if parent.name == "oh-my-codex" else None
-                break
-    except OSError:
-        pass
+omx_discovery = json.loads(discovery_file.read_text(encoding="utf-8"))
+if omx_discovery.get("schema_version") != 1:
+    raise RuntimeError("unsupported OMX discovery schema")
 
 manifest = {
     "format_version": 1,
@@ -250,10 +496,11 @@ manifest = {
     "codex_home": str(codex_home),
     "projects": projects,
     "omx": {
-        "command_path": omx_path,
-        "installed": bool(omx_path or installed_version),
-        "installed_version": installed_version,
-        "npm_prefix": npm_prefix,
+        "command_path": omx_discovery.get("active_command"),
+        "installed": bool(omx_discovery.get("installed")),
+        "installed_version": omx_discovery.get("installed_version"),
+        "npm_prefix": omx_discovery.get("npm_prefix"),
+        "discovery": omx_discovery,
     },
     "entries": entries,
 }
@@ -266,7 +513,7 @@ manifest = {
 print(snapshot_dir.name)
 PY
 
-  rm -f "$project_file"
+  rm -f "$project_file" "$discovery_file"
 }
 
 snapshot_list() {
@@ -367,146 +614,123 @@ PY
 }
 
 remove_npm_installations() {
-  log "OMX npm/실행 파일 제거"
+  local snapshot_manifest="${1:-}"
+  local discovery_file
+  discovery_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-discovery.XXXXXX")"
+  discover_omx_installations > "$discovery_file"
 
-  HOME_DIR="$HOME_DIR" NPM_PREFIXES="$NPM_PREFIXES" python3 <<'PY'
+  if [[ -n "$snapshot_manifest" ]]; then
+    log "스냅샷 이후 추가된 OMX npm/실행 파일 제거"
+  else
+    log "OMX npm/실행 파일 제거"
+  fi
+
+  OMX_DISCOVERY_FILE="$discovery_file" \
+  SNAPSHOT_MANIFEST="$snapshot_manifest" \
+  python3 <<'PY'
 from pathlib import Path
+import json
 import os
 import shutil
-import subprocess
+import sys
 
-home = Path(os.environ["HOME_DIR"]).expanduser().resolve()
+discovery_path = Path(os.environ["OMX_DISCOVERY_FILE"])
+current = json.loads(discovery_path.read_text(encoding="utf-8"))
 
-package_dirs = set()
-binary_candidates = set()
-paired_bins = {}
+def path_list(value, label):
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"{label} 경로 목록이 올바르지 않습니다.")
+    paths = {Path(item) for item in value}
+    if not all(path.is_absolute() for path in paths):
+        raise SystemExit(f"{label} 경로는 절대 경로여야 합니다.")
+    return paths
 
-def add_package(package, *bins):
-    package_dirs.add(package)
-    paired_bins.setdefault(package, set()).update(bins)
-    binary_candidates.update(bins)
+def path_root_map(value, paths, roots, label):
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} 경로 출처 형식이 올바르지 않습니다.")
+    result = {}
+    for raw_path, raw_roots in value.items():
+        if not isinstance(raw_path, str):
+            raise SystemExit(f"{label} 경로 출처 키가 올바르지 않습니다.")
+        path = Path(raw_path)
+        path_roots = path_list(raw_roots, f"{label} 경로 출처")
+        if path not in paths or not path_roots or not path_roots.issubset(roots):
+            raise SystemExit(f"{label} 경로 출처가 탐색 결과와 일치하지 않습니다.")
+        result[path] = path_roots
+    if set(result) != paths:
+        raise SystemExit(f"{label} 경로 출처가 누락되었습니다.")
+    return result
 
-# NVM
-for node_dir in (home / ".nvm" / "versions" / "node").glob("*"):
-    add_package(
-        node_dir / "lib" / "node_modules" / "oh-my-codex",
-        node_dir / "bin" / "omx",
-    )
+if current.get("schema_version") != 1:
+    raise SystemExit("현재 OMX 탐색 결과 형식을 지원하지 않습니다.")
 
-# fnm
-for install in (home / ".local" / "share" / "fnm" / "node-versions").glob("*/installation"):
-    add_package(
-        install / "lib" / "node_modules" / "oh-my-codex",
-        install / "bin" / "omx",
-    )
-
-# Volta
-add_package(
-    home / ".volta" / "tools" / "image" / "packages" / "oh-my-codex",
-    home / ".volta" / "bin" / "omx",
+current_paths = path_list(current.get("removable_paths"), "현재 OMX")
+current_roots = path_list(current.get("scan_roots"), "현재 OMX 탐색 루트")
+current_path_roots = path_root_map(
+    current.get("path_roots"),
+    current_paths,
+    current_roots,
+    "현재 OMX",
 )
+snapshot_manifest = os.environ.get("SNAPSHOT_MANIFEST")
+preserved_paths = set()
+eligible_roots = current_roots
 
-# Common npm prefixes. Tests can replace system prefixes with isolated paths.
-prefixes = [home / ".npm-global"]
-prefixes.extend(
-    Path(raw).expanduser()
-    for raw in os.environ["NPM_PREFIXES"].split(os.pathsep)
-    if raw
-)
-
-for prefix in prefixes:
-    add_package(
-        prefix / "lib" / "node_modules" / "oh-my-codex",
-        prefix / "bin" / "omx",
-    )
-
-# Current npm prefix/root, bounded so a broken npm cannot hang cleanup.
-for command in (["npm", "prefix", "-g"], ["npm", "root", "-g"]):
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-            timeout=5,
+if snapshot_manifest:
+    manifest = json.loads(Path(snapshot_manifest).read_text(encoding="utf-8"))
+    saved = manifest.get("omx", {}).get("discovery")
+    if (
+        not isinstance(saved, dict)
+        or saved.get("schema_version") != 1
+        or not isinstance(saved.get("removable_paths"), list)
+        or not isinstance(saved.get("scan_roots"), list)
+        or not isinstance(saved.get("path_roots"), dict)
+    ):
+        print(
+            "WARN: 이전 형식 스냅샷에는 정확한 설치 경로가 없어 "
+            "npm 패키지/실행 파일 제거를 건너뜁니다.",
+            file=sys.stderr,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        continue
+        raise SystemExit(0)
+    preserved_paths = path_list(saved.get("removable_paths"), "스냅샷 OMX")
+    saved_roots = path_list(saved.get("scan_roots"), "스냅샷 OMX 탐색 루트")
+    path_root_map(
+        saved.get("path_roots"),
+        preserved_paths,
+        saved_roots,
+        "스냅샷 OMX",
+    )
+    eligible_roots = saved_roots
 
-    value = result.stdout.strip()
-    if not value:
-        continue
+new_paths = current_paths - preserved_paths
+targets = sorted(
+    (
+        path
+        for path in new_paths
+        if current_path_roots[path] & eligible_roots
+    ),
+    key=lambda path: (len(path.parts), str(path)),
+    reverse=True,
+)
+skipped = sorted(new_paths - set(targets), key=str)
 
-    path = Path(value)
-    if command[1] == "root":
-        package = path / "oh-my-codex"
-        bin_path = path.parent.parent / "bin" / "omx"
-    else:
-        package = path / "lib" / "node_modules" / "oh-my-codex"
-        bin_path = path / "bin" / "omx"
+for target in skipped:
+    print(
+        "WARN: 스냅샷 당시 탐색하지 않은 루트의 OMX 경로를 보존합니다: "
+        f"{target}",
+        file=sys.stderr,
+    )
 
-    add_package(package, bin_path)
-
-# Resolve the active command even for custom package-manager layouts.
-active_omx = shutil.which("omx")
-if active_omx:
-    active_path = Path(active_omx)
-    binary_candidates.add(active_path)
-    try:
-        resolved = active_path.resolve()
-        for parent in [resolved, *resolved.parents]:
-            package_json = parent / "package.json"
-            if not package_json.is_file():
-                continue
-            try:
-                import json
-                data = json.loads(package_json.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if data.get("name") == "oh-my-codex":
-                add_package(parent, active_path)
-                break
-    except OSError:
-        pass
-
-removed_packages = set()
-
-for package in sorted(package_dirs, key=lambda p: len(p.parts), reverse=True):
-    if package.is_symlink() or package.is_file():
-        package.unlink(missing_ok=True)
-        removed_packages.add(package)
-        print(f"removed: {package}")
-    elif package.is_dir():
-        shutil.rmtree(package)
-        removed_packages.add(package)
-        print(f"removed: {package}")
-
-for binary in sorted(binary_candidates):
-    if not (binary.exists() or binary.is_symlink()):
-        continue
-
-    safe_to_remove = False
-
-    # Remove a paired CLI only when its package existed and was removed.
-    for package, bins in paired_bins.items():
-        if binary in bins and package in removed_packages:
-            safe_to_remove = True
-            break
-
-    # Or when the executable/symlink resolves into oh-my-codex.
-    if not safe_to_remove:
-        try:
-            resolved_text = str(binary.resolve())
-            safe_to_remove = "oh-my-codex" in resolved_text
-        except OSError:
-            pass
-
-    if safe_to_remove and not binary.is_dir():
-        binary.unlink(missing_ok=True)
-        print(f"removed: {binary}")
+for target in targets:
+    if target.is_symlink() or target.is_file():
+        target.unlink(missing_ok=True)
+        print(f"removed: {target}")
+    elif target.is_dir():
+        shutil.rmtree(target)
+        print(f"removed: {target}")
 PY
 
+  rm -f "$discovery_file"
   hash -r 2>/dev/null || true
 }
 
@@ -718,48 +942,25 @@ status_report() {
   fi
 
   log "전역 패키지/바이너리 흔적"
-  HOME_DIR="$HOME_DIR" python3 <<'PY'
+  local discovery_file
+  discovery_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-discovery.XXXXXX")"
+  discover_omx_installations > "$discovery_file"
+  OMX_DISCOVERY_FILE="$discovery_file" python3 <<'PY'
 from pathlib import Path
+import json
 import os
-import subprocess
 
-home = Path(os.environ["HOME_DIR"]).expanduser().resolve()
-found = []
-
-patterns = [
-    home / ".nvm" / "versions" / "node",
-    home / ".local" / "share" / "fnm" / "node-versions",
-]
-
-for path in (home / ".nvm" / "versions" / "node").glob("*"):
-    for target in [
-        path / "bin" / "omx",
-        path / "lib" / "node_modules" / "oh-my-codex",
-    ]:
-        if target.exists() or target.is_symlink():
-            found.append(target)
-
-for install in (home / ".local" / "share" / "fnm" / "node-versions").glob("*/installation"):
-    for target in [
-        install / "bin" / "omx",
-        install / "lib" / "node_modules" / "oh-my-codex",
-    ]:
-        if target.exists() or target.is_symlink():
-            found.append(target)
-
-for target in [
-    home / ".volta" / "bin" / "omx",
-    home / ".volta" / "tools" / "image" / "packages" / "oh-my-codex",
-]:
-    if target.exists() or target.is_symlink():
-        found.append(target)
-
+data = json.loads(
+    Path(os.environ["OMX_DISCOVERY_FILE"]).read_text(encoding="utf-8")
+)
+found = data.get("removable_paths", [])
 if found:
     for path in found:
         print(path)
 else:
     print("OK: 알려진 Node 관리 경로에 OMX 없음")
 PY
+  rm -f "$discovery_file"
 
   log "주요 Codex 설정의 OMX 흔적"
   local found_config=false
@@ -834,13 +1035,7 @@ PY
   done
 
   if [[ "$no_snapshot" == false ]]; then
-    # Build snapshot using the same project paths.
-    local snapshot_project_args=()
-    while IFS= read -r project; do
-      [[ -n "$project" ]] || continue
-      snapshot_project_args+=(--project "$project")
-    done < "$project_file"
-    snapshot_create "pre-remove" "${snapshot_project_args[@]}"
+    snapshot_from_project_file "pre-remove" "$project_file"
   fi
 
   remove_npm_installations
@@ -995,34 +1190,10 @@ for project in data.get("projects", []):
     print(project)
 PY
 
-  local restore_snapshot_args=()
-  while IFS= read -r project; do
-    [[ -n "$project" ]] || continue
-    restore_snapshot_args+=(--project "$project")
-  done < "$restore_project_file"
-
-  snapshot_create "pre-restore" "${restore_snapshot_args[@]}"
+  snapshot_from_project_file "pre-restore" "$restore_project_file"
   rm -f "$restore_project_file"
 
-  local snapshot_had_omx
-  snapshot_had_omx="$(MANIFEST="$manifest" python3 <<'PY'
-from pathlib import Path
-import json
-import os
-data = json.loads(Path(os.environ["MANIFEST"]).read_text(encoding="utf-8"))
-print("yes" if data.get("omx", {}).get("installed") else "no")
-PY
-)"
-
-  if [[ "$snapshot_had_omx" == "no" ]]; then
-    log "스냅샷 당시 OMX가 없었으므로 현재 OMX 설치 제거"
-    remove_npm_installations
-    clean_codex_config
-    remove_state
-  else
-    warn "이 스냅샷은 OMX가 설치된 상태에서 생성됐습니다."
-    warn "설정 파일은 복구하지만 당시 OMX 패키지 버전을 자동 재설치하지는 않습니다."
-  fi
+  remove_npm_installations "$manifest"
 
   log "스냅샷 복구: $(basename "$snapshot_dir")"
   SNAPSHOT_DIR="$snapshot_dir" python3 <<'PY'

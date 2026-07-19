@@ -22,11 +22,11 @@ PRD.md
 - 프로젝트별 `.omx` 및 `.codex` 선택 백업
 - 스냅샷 목록 조회 및 삭제
 - macOS와 Linux 지원을 목표로 설계
-- NVM, fnm, Volta 및 일반적인 npm 전역 경로 탐색
+- NVM, fnm, Volta, Homebrew/Linuxbrew 및 일반적인 npm 전역 경로 탐색
 
 ## 요구 사항
 
-- Bash
+- Bash 3.2 이상 (`set -u`가 활성화된 macOS 기본 Bash 포함)
 - Python 3.8 이상
 - Codex CLI는 선택 사항
 - npm 및 Node 버전 관리자는 OMX 패키지 제거 시에만 관련됨
@@ -165,7 +165,7 @@ Codex 인증, 세션, 로그 및 명령 이력은 백업 대상에 포함하지 
 다음을 정리합니다.
 
 - `oh-my-codex` 전역 패키지
-- 알려진 NVM, fnm, Volta 및 npm 전역 경로의 OMX 실행 파일
+- 알려진 NVM, fnm, Volta, Homebrew/Linuxbrew 및 npm 전역 경로의 OMX 실행 파일
 - `[mcp_servers.omx_*]` TOML 섹션
 - OMX marketplace 및 plugin 등록
 - 삭제된 `node_modules/oh-my-codex` 경로 참조
@@ -184,17 +184,27 @@ max_depth = 2
 
 이러한 애매한 설정까지 정확하게 되돌리려면 OMX 설치 전에 `snapshot`을 만든 뒤 `restore`를 사용해야 합니다.
 
+Node 설치 경로는 다음 변형을 함께 확인합니다.
+
+- NVM: `~/.nvm`, `$XDG_CONFIG_HOME/nvm`, `$NVM_DIR`
+- fnm: `$XDG_DATA_HOME/fnm`, Linux 기본 경로, macOS `~/Library/Application Support/fnm`, `$FNM_DIR`
+- Volta: `~/.volta`, `$VOLTA_HOME`
+- npm: 현재 `npm prefix/root -g`, `~/.npm-global`, Homebrew, Linuxbrew 및 시스템 prefix
+
 ### `restore`
 
 스냅샷에 기록된 각 경로를 설치 전 상태로 되돌립니다.
 
 - 스냅샷에 존재했던 파일 및 디렉터리는 복원
 - 스냅샷에 존재하지 않았던 경로는 제거
+- 스냅샷 이후 새로 생긴 OMX 패키지와 실행 파일만 제거
+- 스냅샷 당시 비활성 Node 버전에 있던 OMX 설치 경로는 보존
+- 스냅샷 이후 처음 노출된 Node 관리자/npm 루트의 설치는 보존하고 경고
 - 복구 전 현재 상태를 자동 백업
 - 스냅샷의 `HOME` 및 `CODEX_HOME`과 현재 환경이 같은지 확인
 - 복구 후 `config.toml` 문법 검사
 
-OMX가 설치된 상태에서 만든 스냅샷을 복구하는 경우 설정 파일은 복원하지만, 당시 OMX npm 패키지 버전을 자동으로 다시 설치하지는 않습니다. 권장 용도는 OMX 설치 전 스냅샷 복구입니다.
+OMX가 설치된 상태에서 만든 스냅샷을 복구하는 경우 당시 발견한 패키지와 실행 파일의 정확한 경로를 보존하지만, 패키지 내용이나 버전을 자동으로 되돌리지는 않습니다. 정확한 설치 경로 기록이 없는 2.1.0 이하 스냅샷은 데이터 손실을 피하기 위해 npm 패키지 및 실행 파일 제거를 건너뜁니다. 권장 용도는 OMX 설치 전 스냅샷 복구입니다.
 
 ## 스냅샷 위치
 
@@ -216,13 +226,31 @@ Codex 홈이 기본 경로가 아니라면:
 export CODEX_HOME="/custom/path/.codex"
 ```
 
-격리 테스트에서 시스템 npm 경로 탐색을 막으려면 테스트 전용 prefix를 지정할 수 있습니다.
+격리 테스트에서는 실제 홈과 Node 관리자 환경을 상속하지 않도록 모든 관련 경로와 `PATH`를 함께 교체합니다.
 
 ```bash
-export OMX_GUARD_NPM_PREFIXES="$TMP_ROOT/npm-prefixes"
+TMP_ROOT="$(mktemp -d)"
+ISOLATED_BIN="$TMP_ROOT/bin"
+mkdir -p "$ISOLATED_BIN"
+for command_name in bash python3 uname mktemp rm mkdir grep basename; do
+  ln -s "$(command -v "$command_name")" "$ISOLATED_BIN/$command_name"
+done
+
+export HOME="$TMP_ROOT/home"
+export CODEX_HOME="$HOME/.codex"
+export OMX_GUARD_STATE_HOME="$TMP_ROOT/state"
+export OMX_GUARD_NPM_PREFIXES="$TMP_ROOT/npm-prefix"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export NVM_DIR="$HOME/.nvm"
+export FNM_DIR="$XDG_DATA_HOME/fnm"
+export VOLTA_HOME="$HOME/.volta"
+export PATH="$ISOLATED_BIN"
 ```
 
-일반적인 실제 제거에서는 이 값을 설정하지 않아야 `/usr/local`, `/opt/homebrew`, `/usr`도 확인합니다.
+`HOME`만 바꾸고 기존 `NVM_DIR`, `FNM_DIR`, `VOLTA_HOME`, XDG 변수 또는 `PATH`를 남겨두면 실제 사용자 설치 경로가 탐색될 수 있습니다. 가장 안전한 검증 방법은 제공된 `smoke-test.sh` 또는 읽기 전용으로 저장소를 마운트한 컨테이너를 사용하는 것입니다.
+
+일반적인 실제 제거에서는 `OMX_GUARD_NPM_PREFIXES`를 설정하지 않아야 `/usr/local`, `/opt/homebrew`, `/home/linuxbrew/.linuxbrew`, `/usr`도 확인합니다.
 
 스냅샷은 `umask 077`로 생성되어 현재 사용자 외의 접근을 제한합니다.
 
@@ -257,7 +285,7 @@ bash -n omx-guard.sh
 → 설치 전에 없었던 OMX 파일 제거
 ```
 
-macOS용 경로 처리를 포함하도록 설계했지만, 실제 macOS 호스트에서의 통합 테스트는 별도로 수행하는 것이 좋습니다.
+Bash 3.2 컨테이너에서는 프로젝트 인자 없는 `snapshot`, `restore`, `remove`와 macOS/Linux Node 관리자 경로를 함께 검증합니다. 실제 macOS 호스트 통합 테스트는 별도로 수행하는 것이 좋습니다.
 
 ## 버전
 
@@ -265,4 +293,4 @@ macOS용 경로 처리를 포함하도록 설계했지만, 실제 macOS 호스�
 ./omx-guard.sh --version
 ```
 
-현재 스크립트 버전: `2.1.0`
+현재 스크립트 버전: `2.1.1`
