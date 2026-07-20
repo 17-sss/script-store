@@ -1,8 +1,8 @@
 # OMX Guard
 
-macOS와 Linux에서 Oh My Codex(OMX)를 백업, 제거, 복구하기 위한 안전 중심의 CLI 스크립트입니다.
+macOS와 Linux에서 Oh My Codex(OMX) 관련 설정을 스냅샷하고, 네이티브 제거 이후 남은 패키지와 상태를 정리하며, 추적한 파일 상태를 복구하기 위한 안전 중심의 CLI 스크립트입니다.
 
-OMX를 단순히 삭제하는 데 그치지 않고, 설치 전 Codex 개인화 설정을 스냅샷으로 저장한 뒤 나중에 원래 상태로 복구할 수 있습니다.
+OMX Guard는 `omx uninstall`을 대체하지 않습니다. OMX가 설치한 hooks, prompts, skills, agents 및 `AGENTS.md`는 네이티브 `omx uninstall`로 정리하고, Guard는 그 전후의 스냅샷과 npm 패키지, 실행 파일, 명백한 설정, 상태 및 캐시 정리를 담당합니다.
 
 ## 구성 파일
 
@@ -17,7 +17,8 @@ PRD.md
 
 - 현재 OMX 설치 및 Codex 설정 상태 확인
 - Codex 사용자 설정 스냅샷 생성
-- OMX 전역 패키지, 실행 파일, MCP 등록, 상태 및 캐시 제거
+- 네이티브 `omx uninstall` 전 복구 지점 생성
+- 네이티브 제거 후 OMX 전역 패키지, 실행 파일, 명백한 설정, 상태 및 캐시 정리
 - 설치 전에 존재하던 파일과 존재하지 않던 상태까지 복원
 - 프로젝트별 `.omx` 및 `.codex` 선택 백업
 - 스냅샷 목록 조회 및 삭제
@@ -28,7 +29,8 @@ PRD.md
 
 - Bash 3.2 이상 (`set -u`가 활성화된 macOS 기본 Bash 포함)
 - Python 3.8 이상
-- Codex CLI는 선택 사항
+- Codex CLI 자체는 선택 사항
+- 권장 제거 흐름에서는 전역 패키지를 지우기 전에 OMX CLI의 `omx uninstall`을 실행할 수 있어야 함
 - npm 및 Node 버전 관리자는 OMX 패키지 제거 시에만 관련됨
 
 시스템 전역 경로에 root 권한으로 OMX를 설치한 경우 해당 파일 제거에 적절한 권한이 필요할 수 있습니다. 스크립트 자체를 무조건 `sudo`로 실행하는 것은 권장하지 않습니다.
@@ -86,18 +88,29 @@ OMX는 평소 방식대로 설치하고 사용합니다.
 
 복구 직전 현재 상태도 `pre-restore` 스냅샷으로 자동 저장됩니다.
 
-### 4. 현재 OMX 완전 제거
+### 4. 현재 OMX 제거
 
 ```bash
-./omx-guard.sh remove
+./omx-guard.sh snapshot before-omx-uninstall
+omx uninstall --dry-run
+omx uninstall
+./omx-guard.sh remove --no-snapshot
 ```
 
-`remove`는 삭제 전에 `pre-remove` 스냅샷을 자동 생성합니다.
+각 명령의 역할은 다음과 같습니다.
+
+- `snapshot`: hooks와 Codex 개인 설정을 포함한 제거 전 복구 지점을 생성
+- `omx uninstall --dry-run`: 네이티브 제거 계획이 외부 훅과 충돌하지 않는지 확인
+- `omx uninstall`: OMX가 관리하는 hooks, prompts, skills, agents 및 `AGENTS.md` 정리
+- `remove --no-snapshot`: 이미 명명된 스냅샷이 있으므로 추가 스냅샷 없이 npm 패키지, 실행 파일, 명백한 설정, 상태 및 캐시 정리
+
+`--no-snapshot`을 생략하면 `remove`가 `pre-remove` 스냅샷을 하나 더 생성합니다. `omx uninstall`을 건너뛰고 `remove`만 실행하면 OMX가 설치한 hooks, prompts, skills, agents 또는 `AGENTS.md`가 남을 수 있으므로 완전 제거 절차로 사용하지 않습니다.
 
 프로젝트의 `.omx`도 명시적으로 제거하려면:
 
 ```bash
 ./omx-guard.sh remove \
+  --no-snapshot \
   --purge-project-state \
   --project ~/work/project-a
 ```
@@ -110,7 +123,7 @@ OMX는 평소 방식대로 설치하고 사용합니다.
 omx-guard.sh status
 omx-guard.sh snapshot [이름] [--project /path]...
 omx-guard.sh list
-omx-guard.sh remove [--purge-project-state] [--project /path]...
+omx-guard.sh remove [--no-snapshot] [--purge-project-state] [--project /path]...
 omx-guard.sh restore <스냅샷-ID|label|latest>
 omx-guard.sh delete-snapshot <스냅샷-ID>
 omx-guard.sh help
@@ -162,7 +175,7 @@ Codex 인증, 세션, 로그 및 명령 이력은 백업 대상에 포함하지 
 
 ### `remove`
 
-다음을 정리합니다.
+`remove`는 네이티브 `omx uninstall` 이후의 후처리 명령입니다. 다음을 정리합니다.
 
 - `oh-my-codex` 전역 패키지
 - 알려진 NVM, fnm, Volta, Homebrew/Linuxbrew 및 npm 전역 경로의 OMX 실행 파일
@@ -173,6 +186,16 @@ Codex 인증, 세션, 로그 및 명령 이력은 백업 대상에 포함하지 
 - `~/.config/omx`
 - `~/.config/oh-my-codex`
 - Codex plugin cache의 OMX 디렉터리
+
+다음 항목은 스냅샷 대상이지만 `remove`가 OMX 소유권을 판별해 부분 삭제하지 않습니다. 현재 설치를 제거할 때는 먼저 `omx uninstall`을 실행해야 합니다.
+
+```text
+$CODEX_HOME/hooks.json의 OMX 관리 훅
+$CODEX_HOME/agents의 OMX 관리 파일
+$CODEX_HOME/prompts의 OMX 관리 파일
+$CODEX_HOME/skills의 OMX 관리 파일
+$CODEX_HOME/AGENTS.md의 OMX 관리 내용
+```
 
 다음과 같은 값은 Codex 자체 기능 또는 사용자 설정일 수 있어 자동 삭제하지 않습니다.
 
@@ -191,6 +214,24 @@ Node 설치 경로는 다음 변형을 함께 확인합니다.
 - Volta: `~/.volta`, `$VOLTA_HOME`
 - npm: 현재 `npm prefix/root -g`, `~/.npm-global`, Homebrew, Linuxbrew 및 시스템 prefix
 
+#### `omx uninstall`이 외부 훅 때문에 중단될 때
+
+다음 오류는 Guard 스냅샷 실패가 아니라 네이티브 제거기의 fail-closed 안전장치입니다.
+
+```text
+Error: Removing OMX hooks would shift a foreign coordinate or discard opaque metadata.
+```
+
+OMX 훅과 Orca 같은 외부 도구의 훅이 같은 `hooks.json` 배열에 있으면 OMX 항목을 제거하면서 외부 훅의 배열 좌표가 바뀔 수 있습니다. Guard snapshot은 이 검사를 우회하지 않습니다.
+
+1. `omx uninstall --dry-run`으로 오류를 재현합니다.
+2. `$CODEX_HOME/hooks.json`과 해당 외부 도구 설정을 별도로 백업합니다.
+3. 외부 도구의 자체 제거 기능을 사용하거나, 소유권이 명확한 외부 훅만 제거합니다.
+4. `omx uninstall --dry-run`이 성공하는지 다시 확인합니다.
+5. 성공하면 `omx uninstall`과 `omx-guard.sh remove --no-snapshot`을 순서대로 실행합니다.
+
+출처가 불명확한 hook 객체를 문자열 검색만으로 삭제하지 않습니다.
+
 ### `restore`
 
 스냅샷에 기록된 각 경로를 설치 전 상태로 되돌립니다.
@@ -204,7 +245,15 @@ Node 설치 경로는 다음 변형을 함께 확인합니다.
 - 스냅샷의 `HOME` 및 `CODEX_HOME`과 현재 환경이 같은지 확인
 - 복구 후 `config.toml` 문법 검사
 
-OMX가 설치된 상태에서 만든 스냅샷을 복구하는 경우 당시 발견한 패키지와 실행 파일의 정확한 경로를 보존하지만, 패키지 내용이나 버전을 자동으로 되돌리지는 않습니다. 정확한 설치 경로 기록이 없는 2.1.0 이하 스냅샷은 데이터 손실을 피하기 위해 npm 패키지 및 실행 파일 제거를 건너뜁니다. 권장 용도는 OMX 설치 전 스냅샷 복구입니다.
+OMX가 설치된 상태에서 만든 스냅샷을 복구하는 경우 당시 발견한 패키지와 실행 파일의 정확한 경로를 보존하지만, 패키지 내용이나 버전을 자동으로 되돌리지는 않습니다. 제거 전 스냅샷으로 돌아가려면 manifest의 `omx.installed_version`을 확인하고 원래 사용한 패키지 관리자로 해당 버전을 먼저 설치한 뒤 restore를 실행합니다.
+
+```bash
+npm install -g oh-my-codex@0.20.2  # 예: manifest에 0.20.2가 기록된 경우
+./omx-guard.sh restore before-omx-uninstall
+omx doctor
+```
+
+정확한 설치 경로 기록이 없는 2.1.0 이하 스냅샷은 데이터 손실을 피하기 위해 npm 패키지 및 실행 파일 제거를 건너뜁니다. 가장 단순하고 정확한 용도는 OMX 설치 전에 만든 스냅샷으로 복구하는 것입니다.
 
 ## 스냅샷 위치
 
@@ -257,6 +306,9 @@ export PATH="$ISOLATED_BIN"
 ## 안전 설계
 
 - `remove` 전에 자동 스냅샷 생성
+- 현재 설치를 완전히 제거할 때는 `omx uninstall`로 관리 파일을 먼저 정리
+- Guard snapshot은 네이티브 uninstall의 외부 훅 소유권 검사를 우회하지 않음
+- 설치된 상태의 스냅샷은 npm 패키지 자체를 포함하지 않으므로 복구 전에 같은 버전 재설치 필요
 - `restore` 전에 현재 상태 자동 스냅샷 생성
 - 프로젝트 상태 삭제는 명시적인 옵션과 프로젝트 경로가 필요
 - 개인 설정일 수 있는 legacy agent 옵션은 자동 삭제하지 않음

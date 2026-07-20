@@ -10,7 +10,9 @@
 
 ## 2. 배경
 
-OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 설정에 다음 흔적이 남을 수 있다.
+네이티브 `omx uninstall`과 npm 전역 패키지 삭제는 담당 범위가 다르다. 네이티브 제거기는 OMX가 관리하는 hooks, prompts, skills, agents 및 `AGENTS.md`를 소유권 기준으로 정리하지만 전역 npm 패키지 자체를 제거하지 않는다. 반대로 OMX Guard의 `remove`는 패키지, 실행 파일, 명백한 설정, 상태 및 캐시를 정리하지만 네이티브 관리 파일의 부분 삭제를 대체하지 않는다.
+
+두 단계 중 하나만 실행하면 Codex 사용자 설정에 다음 흔적이 남을 수 있다.
 
 - `mcp_servers.omx_*`
 - OMX marketplace/plugin 등록
@@ -26,13 +28,14 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 
 사용자는 다음 두 상황을 안전하게 처리할 수 있어야 한다.
 
-1. 현재 설치된 OMX와 활성 설정 흔적을 제거한다.
+1. 스냅샷, 네이티브 uninstall, Guard 후처리를 순서대로 실행하여 현재 설치된 OMX와 활성 설정 흔적을 제거한다.
 2. OMX를 다시 설치하고 사용한 뒤, 설치 전의 개인화된 Codex 환경으로 되돌린다.
 
 ## 4. 목표
 
 - OMX 설치 전 사용자 설정을 파일 단위로 보존한다.
-- OMX 제거 전에 자동으로 복구 지점을 만든다.
+- 네이티브 OMX 제거 전에 복구 지점을 만든다.
+- `omx uninstall`이 관리하는 설정 자산과 Guard가 정리하는 패키지 및 상태의 책임 경계를 명확히 한다.
 - OMX 관련 패키지, 실행 파일, MCP 설정, 상태와 캐시를 제거한다.
 - 설치 전에 없던 파일까지 포함해 정확한 파일 존재 상태를 복원한다.
 - macOS 및 Linux의 일반적인 Node 설치 환경을 지원한다.
@@ -43,6 +46,8 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - Codex CLI 자체 제거
 - Codex 인증 정보, 세션, 로그, 명령 이력 백업
 - 임의의 사용자 TOML 설정을 OMX 소유로 추측해 삭제
+- 네이티브 `omx uninstall` 대체
+- 제3자 훅의 소유권을 추측하여 자동 삭제하거나 네이티브 uninstall의 fail-closed 검사를 우회
 - OMX가 설치된 스냅샷의 npm 패키지 자동 재설치
 - Windows 네이티브 환경 지원
 - 프로젝트 전체 소스코드 백업
@@ -52,12 +57,12 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 
 ### 시나리오 A: 현재 OMX 제거
 
-1. 사용자가 `remove`를 실행한다.
-2. 도구는 현재 Codex 관련 상태를 `pre-remove` 스냅샷으로 저장한다.
-3. 알려진 OMX 패키지와 실행 파일을 제거한다.
-4. Codex 설정에서 명백한 OMX 섹션과 경로 참조를 제거한다.
-5. 상태 및 캐시를 제거한다.
-6. 최종 상태를 출력한다.
+1. 사용자가 `snapshot before-omx-uninstall`을 실행한다.
+2. 사용자가 `omx uninstall --dry-run`으로 네이티브 제거 계획을 검증한다.
+3. dry-run이 성공하면 `omx uninstall`로 OMX 관리 hooks, prompts, skills, agents 및 `AGENTS.md`를 제거한다.
+4. 사용자가 `remove --no-snapshot`을 실행한다.
+5. Guard는 알려진 OMX 패키지, 실행 파일, 명백한 설정, 상태 및 캐시를 제거한다.
+6. 사용자가 Guard `status`로 최종 상태를 확인한다. 전역 패키지와 `omx` 실행 파일이 제거된 뒤에는 `omx doctor`를 실행할 수 없다.
 
 ### 시나리오 B: OMX 설치 전 환경 보존
 
@@ -74,11 +79,21 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 5. 설치 전에 존재했던 설정 파일과 디렉터리를 복원한다.
 6. TOML 문법과 최종 상태를 확인한다.
 
+OMX가 설치된 상태에서 만든 스냅샷으로 복구하려면 사용자가 manifest의 `omx.installed_version`을 확인하고 원래 패키지 관리자로 해당 버전을 먼저 재설치해야 한다. Guard는 npm 패키지 내용을 스냅샷하거나 자동 재설치하지 않는다.
+
 ### 시나리오 D: 프로젝트별 OMX 상태 관리
 
 1. 사용자가 `--project`로 프로젝트를 명시한다.
 2. 스냅샷은 `<project>/.omx`, `<project>/.codex`를 포함한다.
 3. 프로젝트 `.omx` 삭제는 `--purge-project-state`가 있을 때만 수행한다.
+
+### 시나리오 E: 네이티브 uninstall이 외부 훅 때문에 중단됨
+
+1. `omx uninstall --dry-run`이 `Removing OMX hooks would shift a foreign coordinate or discard opaque metadata` 오류로 중단된다.
+2. 사용자는 Guard snapshot이 이 검사를 우회하지 않는다는 안내를 확인한다.
+3. 사용자는 `hooks.json`과 외부 도구 설정을 백업하고, 소유권이 명확한 제3자 훅을 해당 도구의 제거 절차로 정리한다.
+4. 사용자는 `omx uninstall --dry-run`을 다시 실행한다.
+5. dry-run이 성공한 뒤에만 시나리오 A의 실제 제거를 계속한다.
 
 ## 7. 기능 요구사항
 
@@ -108,7 +123,7 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - `--project`를 반복해서 받을 수 있음
 - 백업 권한은 현재 사용자에게 제한
 
-### FR-3 OMX 제거
+### FR-3 네이티브 제거 후 Guard 정리
 
 `remove`는 다음을 수행해야 한다.
 
@@ -120,6 +135,15 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - OMX 상태 및 plugin cache 제거
 - `multi_agent`, `max_threads`, `max_depth`는 자동 삭제하지 않음
 - 프로젝트 `.omx`는 명시적 옵션 없이는 제거하지 않음
+- 명명된 제거 전 스냅샷이 이미 있는 경우 `--no-snapshot`으로 중복 스냅샷 생성을 생략할 수 있음
+
+`remove`는 다음을 수행하지 않는다.
+
+- `$CODEX_HOME/hooks.json`에서 OMX 관리 훅의 소유권 기반 부분 삭제
+- OMX가 설치한 prompts, skills, agents 및 `AGENTS.md`의 소유권 기반 부분 삭제
+- 제3자 훅 제거 또는 네이티브 uninstall 안전 검사 우회
+
+현재 설치를 완전히 제거하는 문서 흐름은 `snapshot` → `omx uninstall --dry-run` → `omx uninstall` → `remove --no-snapshot` 순서를 사용해야 한다.
 
 ### FR-4 복구
 
@@ -136,6 +160,7 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - 스냅샷 이후 처음 노출된 탐색 루트의 경로는 보존하고 경고
 - 정확한 설치 경로가 없는 이전 manifest에서는 npm 패키지 제거를 보수적으로 건너뜀
 - OMX 설치 스냅샷의 패키지 내용이나 버전은 자동 복원하지 않음
+- OMX 설치 스냅샷 복구 절차는 manifest 버전 재설치 → `restore` → `omx doctor` 순서를 안내
 
 ### FR-5 스냅샷 관리
 
@@ -144,6 +169,16 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - `latest`: 가장 최근 스냅샷 선택
 - 동일 label은 가장 최근 스냅샷 선택
 
+### FR-6 네이티브 uninstall 연계 안내
+
+문서는 다음을 명시해야 한다.
+
+- Guard는 `omx uninstall`의 대체제가 아님
+- 실제 제거 전에 `omx uninstall --dry-run` 사용
+- 외부 훅 좌표 또는 불투명 메타데이터 오류는 Guard snapshot 실패가 아니라 네이티브 fail-closed 결과
+- 외부 훅은 출처와 소유권을 확인한 뒤 해당 도구의 제거 절차로 정리
+- 네이티브 uninstall 성공 후 Guard `remove`로 패키지와 상태를 후처리
+
 ## 8. 비기능 요구사항
 
 ### NFR-1 안전성
@@ -151,6 +186,8 @@ OMX 제거 명령이나 npm 전역 패키지 삭제만으로는 Codex 사용자 
 - Bash strict mode 사용
 - 스냅샷 파일 권한 제한
 - 삭제 전에 복구 지점 생성
+- 네이티브 uninstall의 외부 훅 소유권 검사를 우회하지 않음
+- 제3자 훅은 문자열 일치만으로 자동 삭제하지 않음
 - 프로젝트 삭제는 명시적 선택
 - 다른 홈 환경으로 복구 차단
 - 사용자의 Codex 인증/세션 데이터는 다루지 않음
@@ -238,6 +275,10 @@ manifest 주요 필드:
 - 프로젝트를 지정한 스냅샷은 프로젝트 `.codex`를 복원하고 `.omx` 존재 상태를 되돌린다.
 - `remove`는 명백한 `mcp_servers.omx_*`를 제거하지만 개인 MCP 설정은 보존한다.
 - `remove`는 legacy agent 옵션을 자동 삭제하지 않는다.
+- 문서는 `remove` 단독 실행을 완전 제거로 설명하지 않는다.
+- 문서는 `snapshot` → `omx uninstall --dry-run` → `omx uninstall` → `remove --no-snapshot` 순서를 제공한다.
+- 외부 훅 좌표 오류 발생 시 snapshot이 검사를 우회하지 않으며 제3자 훅 소유권을 먼저 확인하도록 안내한다.
+- OMX 설치 스냅샷 복구 시 기록된 버전의 패키지를 먼저 재설치하도록 안내한다.
 - 서로 다른 `HOME`으로 복구를 시도하면 중단된다.
 - 스냅샷 루트 밖 경로나 변조된 manifest의 허용되지 않은 복구 경로는 거부된다.
 - 스냅샷 루트 바깥 경로는 `delete-snapshot`으로 삭제할 수 없다.
@@ -299,6 +340,12 @@ export PATH="$ISOLATED_BIN"
 11. 스냅샷 당시 비활성 OMX 설치 및 무관한 동명 실행 파일 보존 확인
 12. 새로 노출된 탐색 루트와 로컬 소스 체크아웃 보존 확인
 
+문서 검증:
+
+13. `remove`를 네이티브 uninstall의 대체제로 표현하지 않는지 확인
+14. 권장 제거 순서와 `--no-snapshot`의 목적이 README와 PRD에서 일치하는지 확인
+15. 외부 훅 fail-closed 오류와 설치된 상태의 스냅샷 복구 제한이 문서화됐는지 확인
+
 ## 12. 향후 개선 후보
 
 - `--dry-run`
@@ -308,4 +355,6 @@ export PATH="$ISOLATED_BIN"
 - Homebrew 또는 패키지 매니저 설치 지원
 - CI 기반 macOS/Linux 행렬 테스트
 - OMX 버전별 설정 소유권 manifest
+- 네이티브 `omx uninstall` dry-run 결과를 읽기 전용으로 요약하는 보조 명령
+- 외부 훅 소유권 충돌 진단 개선
 - 복구 전 diff 미리보기
