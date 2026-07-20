@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
@@ -58,6 +59,8 @@ function parseArgs(args) {
     showAll: false,
     listMode: '',
     json: false,
+    forceDelete: false,
+    quarantineDir: defaultQuarantineDir(),
     help: false,
   };
 
@@ -70,12 +73,17 @@ function parseArgs(args) {
       options.showAll = true;
     } else if (arg === '--json') {
       options.json = true;
+    } else if (arg === '--force') {
+      options.forceDelete = true;
     } else if (arg === '--codex-home') {
       index += 1;
       options.codexHome = requireValue(arg, args[index]);
     } else if (arg === '--cwd') {
       index += 1;
       options.cwd = requireValue(arg, args[index]);
+    } else if (arg === '--quarantine-dir') {
+      index += 1;
+      options.quarantineDir = requireValue(arg, args[index]);
     } else if (arg === '--list') {
       index += 1;
       options.listMode = requireValue(arg, args[index]);
@@ -89,6 +97,8 @@ function parseArgs(args) {
 
   options.codexHome = normalizePath(options.codexHome);
   options.cwd = normalizePath(options.cwd);
+  options.quarantineDir = normalizePath(options.quarantineDir);
+  validateQuarantineDir(options);
   return options;
 }
 
@@ -109,6 +119,7 @@ function printUsage() {
 
 Usage:
   codex-session-manager.js [--all] [--cwd PATH] [--codex-home PATH]
+                           [--quarantine-dir PATH] [--force]
   codex-session-manager.js --list active|archived|all [--all] [--json]
 
 Keys:
@@ -122,13 +133,15 @@ Keys:
   r                Resume active session
   b                Archive selected or cursor session
   u                Unarchive selected or cursor session
-  d                Delete selected or cursor session
+  d                Quarantine selected or cursor session
   R                Refresh
   q                Quit
 
 Notes:
   Listings are read from $CODEX_HOME/sessions and $CODEX_HOME/archived_sessions.
-  Mutating actions call the official Codex CLI: archive, delete, and unarchive.
+  Archive and unarchive call the official Codex CLI.
+  Delete moves only the selected transcript(s) to the quarantine directory.
+  Start with --force to permanently delete only the selected transcript(s).
 `);
 }
 
@@ -376,45 +389,244 @@ async function unarchiveSelected(state) {
 }
 
 async function deleteSelected(state) {
-  let entries = await checkedMutationTargets(state, actionTargetEntries(state), 'delete');
+  const permanent = state.options.forceDelete;
+  const action = permanent ? 'force delete' : 'quarantine';
+  let entries = await checkedMutationTargets(state, actionTargetEntries(state), action);
   if (!entries || entries.length === 0) {
     return;
   }
 
-  const expected = deleteConfirmationText(entries);
-  const answer = await promptLine(state, deleteConfirmationPrompt(entries, expected));
+  const expected = deleteConfirmationText(entries, permanent);
+  const answer = await promptLine(state, deleteConfirmationPrompt(state, entries, expected));
 
   if (answer.trim() !== expected) {
-    state.status = `Delete cancelled. Required input was ${expected}`;
+    state.status = `${permanent ? 'Permanent delete' : 'Quarantine'} cancelled. Required input was ${expected}`;
     return;
   }
 
-  entries = await checkedMutationTargets(state, entries, 'delete');
+  entries = await checkedMutationTargets(state, entries, action);
   if (!entries || entries.length === 0) {
     return;
   }
 
-  const result = await runCodexBatch(state, entries, (entry) => ['delete', entry.canonicalId, '--force'], 'Deleted');
+  const result = permanent
+    ? await permanentlyDeleteBatch(state, entries)
+    : await quarantineBatch(state, entries);
   if (!result.blocked) {
     state.selected.clear();
   }
   refresh(state);
 }
 
-function deleteConfirmationText(entries) {
-  return `DELETE ${entries.map((entry) => entry.canonicalId).join(' ')}`;
+function deleteConfirmationText(entries, permanent) {
+  const verb = permanent ? 'FORCE DELETE' : 'QUARANTINE';
+  return `${verb} ${entries.map((entry) => entry.canonicalId).join(' ')}`;
 }
 
-function deleteConfirmationPrompt(entries, expected) {
+function deleteConfirmationPrompt(state, entries, expected) {
+  const permanent = state.options.forceDelete;
   const targetLines = entries.map((entry, index) => `  ${index + 1}. ${entry.canonicalId}  ${entry.summary}`);
   return [
-    danger('Permanent delete confirmation'),
+    permanent ? danger('Permanent delete confirmation') : warningText('Quarantine confirmation'),
     `${strong('Targets:')}`,
     ...targetLines,
     `${strong('Required input:')} ${requiredInput(expected)}`,
-    dim('This will run codex delete --force for the target session(s).'),
+    permanent
+      ? danger('This permanently unlinks only the listed transcript file(s). It cannot be undone.')
+      : dim(`Files will be moved under ${state.options.quarantineDir}`),
     `${keyText('> ')}`
   ].join('\n');
+}
+
+async function quarantineBatch(state, entries) {
+  suspendTui(state);
+  console.log('');
+  console.log(`Quarantine target${entries.length === 1 ? '' : 's'}:`);
+  for (const entry of entries) {
+    console.log(`- ${entry.canonicalId}  ${sanitizeTerminalText(entry.summary)}`);
+  }
+  console.log(`\nQuarantine root: ${state.options.quarantineDir}`);
+
+  let result;
+  try {
+    result = moveEntriesToQuarantine(state.options, entries);
+    state.status = `Quarantined ${entries.length} session${entries.length === 1 ? '' : 's'} in ${result.batchDir}`;
+  } catch (error) {
+    state.status = `Quarantine failed: ${error.message}`;
+    result = {blocked: true};
+  }
+  resumeTui(state);
+  return result;
+}
+
+function moveEntriesToQuarantine(options, entries) {
+  fs.mkdirSync(options.quarantineDir, {recursive: true, mode: 0o700});
+  const items = entries.map((entry) => {
+    const storedRelativePath = quarantineRelativePath(options, entry);
+    const stat = fs.statSync(entry.file);
+    return {
+      id: entry.canonicalId,
+      state: entry.state,
+      originalPath: entry.file,
+      storedRelativePath,
+      size: stat.size,
+      mtime: stat.mtime.toISOString(),
+    };
+  });
+  const batchName = createBatchName();
+  const partialDir = path.join(options.quarantineDir, `.partial-${batchName}`);
+  const batchDir = path.join(options.quarantineDir, batchName);
+  fs.mkdirSync(partialDir, {mode: 0o700});
+
+  const createdAt = new Date().toISOString();
+  const manifestPath = path.join(partialDir, 'manifest.json');
+  writeManifest(manifestPath, {
+    version: 1,
+    createdAt,
+    mode: 'quarantine',
+    status: 'moving',
+    items,
+  });
+
+  const moved = [];
+  try {
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const fresh = readEntry(entry.file, entry.state);
+      const reason = mutationBlockReason(entry, fresh, options);
+      if (reason) {
+        throw new Error(`${entry.id}: ${reason}`);
+      }
+      const target = path.join(partialDir, items[index].storedRelativePath);
+      fs.mkdirSync(path.dirname(target), {recursive: true, mode: 0o700});
+      moveExactFile(entry.file, target);
+      moved.push({source: entry.file, target});
+    }
+
+    writeManifest(manifestPath, {
+      version: 1,
+      createdAt,
+      completedAt: new Date().toISOString(),
+      mode: 'quarantine',
+      status: 'complete',
+      items,
+    });
+    fs.renameSync(partialDir, batchDir);
+  } catch (error) {
+    const rollbackErrors = rollbackMoves(moved);
+    if (rollbackErrors.length === 0) {
+      fs.rmSync(partialDir, {recursive: true, force: true});
+    }
+    const suffix = rollbackErrors.length > 0
+      ? `; rollback incomplete: ${rollbackErrors.join('; ')}; inspect ${partialDir}`
+      : '';
+    throw new Error(`${error.message}${suffix}`);
+  }
+
+  return {blocked: false, batchDir};
+}
+
+async function permanentlyDeleteBatch(state, entries) {
+  suspendTui(state);
+  console.log('');
+  console.log(`Permanent delete target${entries.length === 1 ? '' : 's'}:`);
+  for (const entry of entries) {
+    console.log(`- ${entry.canonicalId}  ${sanitizeTerminalText(entry.summary)}`);
+  }
+  console.log('');
+
+  let deleted = 0;
+  let blocked = null;
+  let failed = null;
+  for (const entry of entries) {
+    const fresh = readEntry(entry.file, entry.state);
+    const reason = mutationBlockReason(entry, fresh, state.options);
+    if (reason) {
+      blocked = {entry: fresh || entry, reason};
+      break;
+    }
+    try {
+      fs.unlinkSync(entry.file);
+      deleted += 1;
+    } catch (error) {
+      failed = {entry, reason: error.message};
+      break;
+    }
+  }
+
+  resumeTui(state);
+  if (blocked || failed) {
+    const problem = blocked || failed;
+    state.status = deleted === 0
+      ? `Blocked force delete: ${problem.entry.id}  ${sanitizeTerminalText(problem.reason)}`
+      : `Force delete stopped after ${deleted} session${deleted === 1 ? '' : 's'}: ${sanitizeTerminalText(problem.reason)}`;
+  } else {
+    state.status = `Permanently deleted ${deleted} session${deleted === 1 ? '' : 's'}`;
+  }
+  return {blocked: Boolean(blocked || failed), deleted};
+}
+
+function quarantineRelativePath(options, entry) {
+  const relative = path.relative(options.codexHome, entry.file);
+  if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+    throw new Error(`session path is outside CODEX_HOME: ${entry.file}`);
+  }
+  return relative;
+}
+
+function createBatchName() {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  return `${stamp}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function writeManifest(file, manifest) {
+  const temporary = `${file}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, {encoding: 'utf8', mode: 0o600, flag: 'w'});
+  fs.renameSync(temporary, file);
+}
+
+function moveExactFile(source, target) {
+  if (fs.existsSync(target)) {
+    throw new Error(`quarantine target already exists: ${target}`);
+  }
+  try {
+    fs.renameSync(source, target);
+    return;
+  } catch (error) {
+    if (error.code !== 'EXDEV') {
+      throw error;
+    }
+  }
+
+  try {
+    fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+    const sourceStat = fs.statSync(source);
+    const targetStat = fs.statSync(target);
+    if (sourceStat.size !== targetStat.size) {
+      throw new Error(`copied file size mismatch for ${source}`);
+    }
+    fs.unlinkSync(source);
+  } catch (error) {
+    try {
+      fs.unlinkSync(target);
+    } catch {
+      // Keep the original error; a later rollback report points to the partial batch.
+    }
+    throw error;
+  }
+}
+
+function rollbackMoves(moved) {
+  const errors = [];
+  for (const item of [...moved].reverse()) {
+    try {
+      fs.mkdirSync(path.dirname(item.source), {recursive: true, mode: 0o700});
+      moveExactFile(item.target, item.source);
+    } catch (error) {
+      errors.push(`${item.source}: ${error.message}`);
+    }
+  }
+  return errors;
 }
 
 async function checkedMutationTargets(state, entries, action) {
@@ -426,7 +638,7 @@ async function checkedMutationTargets(state, entries, action) {
   const unsafe = [];
   for (const entry of entries) {
     const fresh = readEntry(entry.file, entry.state);
-    const reason = mutationBlockReason(entry, fresh);
+    const reason = mutationBlockReason(entry, fresh, state.options);
     if (reason) {
       unsafe.push({
         entry: fresh || entry,
@@ -446,7 +658,11 @@ async function checkedMutationTargets(state, entries, action) {
   return checked;
 }
 
-function mutationBlockReason(original, fresh) {
+function mutationBlockReason(original, fresh, options) {
+  const pathReason = mutationPathBlockReason(original, options);
+  if (pathReason) {
+    return pathReason;
+  }
   if (!original.mutationSafe) {
     return original.unsafeReason || 'session identity is unsafe';
   }
@@ -462,10 +678,25 @@ function mutationBlockReason(original, fresh) {
   return '';
 }
 
+function mutationPathBlockReason(entry, options) {
+  if (!options) {
+    return '';
+  }
+  const expectedRoot = entry.state === 'active'
+    ? sessionsDir(options)
+    : entry.state === 'archived'
+      ? archivedDir(options)
+      : '';
+  if (!expectedRoot || !isUnderPath(entry.file, expectedRoot) || path.extname(entry.file) !== '.jsonl') {
+    return `transcript path is outside the expected ${entry.state || 'session'} directory`;
+  }
+  return '';
+}
+
 async function showBlockedMutation(state, action, unsafe) {
   const lines = [
     danger(`Blocked ${action}: unsafe session selected`),
-    dim('No Codex CLI command was executed. Clear the selection and choose only safe sessions.'),
+    dim('No mutation was executed. Clear the selection and choose only safe sessions.'),
     '',
     ...unsafe.map(({entry, reason}, index) => `${index + 1}. ${entry.id}  ${sanitizeTerminalText(reason)}`),
     '',
@@ -496,7 +727,7 @@ async function runCodexBatch(state, entries, argsForEntry, verb) {
   let blocked = null;
   for (const entry of entries) {
     const fresh = readEntry(entry.file, entry.state);
-    const reason = mutationBlockReason(entry, fresh);
+    const reason = mutationBlockReason(entry, fresh, state.options);
     if (reason) {
       blocked = {entry: fresh || entry, reason};
       break;
@@ -605,6 +836,7 @@ function render(state) {
     strong(APP_NAME),
     `View: ${valueText(state.view)}`,
     `Scope: ${valueText(scope)}`,
+    `Delete: ${state.options.forceDelete ? danger('permanent') : warningText('quarantine')}`,
     `Marked: ${selectedCount > 0 ? warningText(String(selectedCount)) : '0'}`,
     `Sessions: ${entries.length}`,
   ].join(' | ');
@@ -615,7 +847,8 @@ function render(state) {
     lines.push(truncateStyled(`${strong('Tip:')} search applies after Enter; press Esc to return to the list`, width));
   } else {
     lines.push(truncateStyled(`Move: ${keyText('Up/Down,j/k')} | ${keyText('Tab')}=list | ${keyText('a')}=scope | ${keyText('/')}=search | ${keyText('R')}=refresh | ${keyText('q')}=quit`, width));
-    lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${danger('d')}=del`, width));
+    const deleteLabel = state.options.forceDelete ? danger('d=PERMADEL') : warningText('d=quarantine');
+    lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${deleteLabel}`, width));
   }
 
   const start = state.scroll;
@@ -1083,6 +1316,29 @@ function sessionsDir(options) {
 
 function archivedDir(options) {
   return path.join(options.codexHome, 'archived_sessions');
+}
+
+function defaultQuarantineDir() {
+  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(dataHome, APP_NAME, 'quarantine');
+}
+
+function validateQuarantineDir(options) {
+  const root = path.parse(options.quarantineDir).root;
+  const forbiddenExactPaths = new Set([
+    root,
+    normalizePath(os.homedir()),
+    options.codexHome,
+  ]);
+  if (forbiddenExactPaths.has(options.quarantineDir)) {
+    die('--quarantine-dir must be a dedicated subdirectory, not a filesystem, home, or CODEX_HOME root');
+  }
+  if (
+    isUnderPath(options.quarantineDir, sessionsDir(options)) ||
+    isUnderPath(options.quarantineDir, archivedDir(options))
+  ) {
+    die('--quarantine-dir cannot be inside the active or archived session directories');
+  }
 }
 
 function normalizePath(value) {

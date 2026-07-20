@@ -1,8 +1,8 @@
 # codex-session-manager
 
-Codex 로컬 세션을 TUI에서 찾고, 선택해서 보관/보관취소/삭제하는 도구입니다.
+Codex 로컬 세션을 TUI에서 찾고, 선택해서 보관/보관취소/격리/영구 삭제하는 도구입니다.
 
-Codex CLI는 `resume`, `archive`, `delete`, `unarchive`는 제공하지만, 현재 로컬 active/archived 세션을 한 번에 사람이 보기 좋게 출력하는 `list` 명령은 없습니다. 이 스크립트는 로컬 transcript 파일을 읽어서 목록을 보여주고, 변경 작업은 공식 `codex` CLI로 위임합니다.
+Codex CLI는 `resume`, `archive`, `delete`, `unarchive`는 제공하지만, 현재 로컬 active/archived 세션을 한 번에 사람이 보기 좋게 출력하는 `list` 명령은 없습니다. 이 스크립트는 로컬 transcript 파일을 읽어서 목록을 보여줍니다. 보관/보관취소는 공식 `codex` CLI에 위임하고, 삭제는 다른 세션으로 연쇄되지 않도록 선택한 transcript 파일만 정확히 처리합니다.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ codex-session-manager | View: active | Scope: current folder | Marked: 0 | Sessi
 2. `a`로 현재 폴더 기준 목록과 전체 목록을 전환합니다.
 3. 방향키 또는 `j` / `k`로 원하는 세션에 커서를 둡니다.
 4. `Space`로 행을 선택합니다. 여러 개를 선택하면 한 번에 처리할 수 있습니다.
-5. `b`, `u`, `d`로 보관, 보관취소, 삭제를 실행합니다.
+5. `b`, `u`, `d`로 보관, 보관취소, 격리를 실행합니다.
 
 선택된 행이 하나라도 있으면 `b`, `u`, `d`는 **선택된 행 전체**에 적용됩니다. 선택된 행이 없으면 **현재 커서가 있는 행 하나**에 적용됩니다.
 
@@ -57,6 +57,7 @@ codex-session-manager | View: active | Scope: current folder | Marked: 0 | Sessi
 - 파일명이 정확히 `rollout-...-<UUID>.jsonl` 형식일 때만 끝의 UUID를 canonical ID 후보로 사용합니다.
 - transcript 안에서는 첫 번째 최상위 `session_meta.payload.id`만 확인합니다.
 - 파일명 UUID와 첫 번째 transcript UUID가 의미상 같아야 변경 작업이 가능합니다.
+- 실행 직전 파일 경로가 표시된 상태에 맞는 `$CODEX_HOME/sessions` 또는 `$CODEX_HOME/archived_sessions` 아래의 JSONL인지 다시 확인합니다.
 - 뒤쪽에 부모 세션이나 이전 세션의 `session_meta`가 다시 등장해도 canonical ID를 덮어쓰지 않습니다.
 - UUID가 없거나, 형식이 틀리거나, 두 UUID가 불일치하거나, transcript를 안전하게 판별할 수 없으면 `unsafe`로 표시하고 변경 작업을 차단합니다.
 - 다중 선택에 unsafe 항목이 하나라도 포함되면 안전한 항목만 골라 실행하지 않고 전체 작업을 차단합니다.
@@ -82,28 +83,44 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 | `r` | 현재 active 세션 재개 |
 | `b` | active 세션 보관 |
 | `u` | archived 세션 보관취소 |
-| `d` | 세션 삭제 |
+| `d` | 세션 격리 (`--force` 실행 시 영구 삭제) |
 | `q` | 종료 |
 
-## 삭제 확인
+## 격리와 영구 삭제
 
-삭제는 실수 방지를 위해 확인 문구를 입력해야 합니다. TUI에서는 실제로 입력해야 하는 값이 굵은 노란색으로 표시됩니다.
-
-한 개 삭제:
+기본 실행에서 `d`는 삭제가 아니라 격리입니다. 선택한 JSONL 파일만 아래 기본 위치의 새 batch 디렉터리로 옮기며, batch마다 원래 경로와 보관된 상대 경로를 기록한 `manifest.json`을 생성합니다.
 
 ```txt
-DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d
+$XDG_DATA_HOME/codex-session-manager/quarantine
 ```
 
-여러 개 삭제:
+`XDG_DATA_HOME`이 없으면 `~/.local/share/codex-session-manager/quarantine`을 사용합니다. 다른 위치를 쓰려면 `--quarantine-dir PATH`를 지정할 수 있습니다. active/archived 세션 디렉터리 안쪽이나 홈/CODEX_HOME 자체처럼 지나치게 넓은 경로는 거부합니다.
+
+격리 확인 문구:
 
 ```txt
-DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d 019efd17-ecd0-7302-b59e-df1cf20bb320
+QUARANTINE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 ```
 
-삭제 확인에는 개수나 짧은 prefix가 아니라 화면에 표시된 대상 UUID 전체를 입력합니다. 화면에 표시된 `Required input:` 뒤의 값을 그대로 입력하면 됩니다.
+여러 개라면 대상 UUID 전체가 뒤에 이어집니다.
 
-확인 입력 후 대상 파일을 다시 읽어 UUID 안전성을 재검증합니다. 그 사이 ID가 바뀌거나 unsafe 상태가 되면 CLI를 호출하지 않고 전체 삭제를 차단합니다. 재검증을 통과하면 각 세션에 대해 `codex delete <SESSION_UUID> --force`를 실행합니다.
+격리 없이 영구 삭제하려면 처음부터 `--force`로 TUI를 실행합니다.
+
+```bash
+./codex-session-manager.js --force
+```
+
+상단의 `Delete: permanent`와 `d=PERMADEL` 표시로 영구 삭제 모드임을 확인할 수 있습니다. 이 모드의 확인 문구는 더 강하게 구분됩니다.
+
+```txt
+FORCE DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d
+```
+
+확인에는 개수나 짧은 prefix가 아니라 화면에 표시된 대상 UUID 전체를 입력합니다. `Required input:` 뒤의 값을 그대로 입력해야 합니다.
+
+확인 입력 후 대상 파일을 다시 읽어 UUID 안전성을 재검증합니다. 그 사이 ID가 바뀌거나 unsafe 상태가 되면 아무 파일도 변경하지 않고 전체 작업을 차단합니다. 격리는 batch 작업 도중 실패하면 이미 옮긴 파일을 원래 위치로 되돌리려고 시도합니다. 영구 삭제는 재검증을 통과한 선택 대상의 정확한 JSONL 경로만 `unlink`하며, 공식 `codex delete`를 호출하지 않습니다.
+
+격리한 세션을 복구할 때는 해당 batch의 `manifest.json`에서 `originalPath`와 `storedRelativePath`를 확인한 뒤, batch 아래 파일을 원래 경로로 옮기면 됩니다. 복구 전에는 같은 원래 경로에 새 파일이 생기지 않았는지 먼저 확인하세요.
 
 archive와 unarchive도 실행 전에 대상 UUID 목록을 터미널에 표시합니다.
 
@@ -137,13 +154,14 @@ $CODEX_HOME/archived_sessions
 
 기본 `CODEX_HOME`은 `~/.codex`입니다.
 
-변경 작업은 세션 파일을 직접 수정하지 않고 아래 명령으로 실행합니다.
+archive와 unarchive는 세션 파일을 직접 수정하지 않고 아래 명령으로 실행합니다.
 
 ```bash
 codex archive <SESSION_UUID>
-codex delete <SESSION_UUID> --force
 codex unarchive <SESSION_UUID>
 ```
+
+기본 `d`는 선택한 transcript를 격리 디렉터리로 이동하고, `--force`의 `d`는 선택한 transcript만 영구 삭제합니다.
 
 ## Tests
 
@@ -151,4 +169,4 @@ codex unarchive <SESSION_UUID>
 ./smoke-test.sh
 ```
 
-테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. mutation 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행합니다.
+테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/영구 삭제도 임시 fixture만 대상으로 확인합니다.

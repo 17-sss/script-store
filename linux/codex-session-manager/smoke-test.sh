@@ -10,6 +10,7 @@ TEST_HOME="$TMP_DIR/home"
 TEST_CODEX_HOME="$TMP_DIR/codex-home"
 TEST_BIN="$TMP_DIR/bin"
 FAKE_CODEX_LOG="$TMP_DIR/fake-codex.log"
+QUARANTINE_ROOT="$TMP_DIR/xdg-data/codex-session-manager/quarantine"
 PATH_WITH_FAKE="$TEST_BIN:$PATH"
 PROJECT_CWD="/tmp/codex-session-manager-project"
 
@@ -107,6 +108,7 @@ uuid_ae="019f1000-0000-7000-8000-000000000031"
 uuid_af="019f1000-0000-7000-8000-000000000032"
 uuid_ag="019f1000-0000-7000-8000-000000000033"
 uuid_ah="019f1000-0000-7000-8000-000000000034"
+uuid_ai="019f1000-0000-7000-8000-000000000035"
 
 write_session() {
   local area="$1"
@@ -228,6 +230,7 @@ run_tui() {
   local mutate_file="${3:-}"
   local old_id="${4:-}"
   local new_id="${5:-}"
+  local manager_args="${6:-}"
   if ! command -v script >/dev/null 2>&1; then
     printf 'script command is required for TUI mutation tests\n' >&2
     exit 1
@@ -249,7 +252,7 @@ except BrokenPipeError:
 os._exit(0)
 PY
   } | script -q -e -O "$log" -c \
-    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$TEST_CODEX_HOME' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/codex-session-manager.js' --cwd '$PROJECT_CWD'" \
+    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$TEST_CODEX_HOME' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/codex-session-manager.js' --cwd '$PROJECT_CWD' $manager_args" \
     >/dev/null
   local script_status="${PIPESTATUS[1]}"
   set -o pipefail
@@ -273,6 +276,43 @@ assert_fake_calls() {
 assert_no_fake_calls() {
   if [[ -s "$FAKE_CODEX_LOG" ]]; then
     printf 'expected no fake codex calls, got:\n%s\n' "$(cat "$FAKE_CODEX_LOG")" >&2
+    exit 1
+  fi
+}
+
+assert_quarantined_file() {
+  local source="$1"
+  local id="$2"
+  local found
+  if [[ -e "$source" ]]; then
+    printf 'expected source to be moved to quarantine: %s\n' "$source" >&2
+    exit 1
+  fi
+  found="$(find "$QUARANTINE_ROOT" -type f -name "$(basename -- "$source")" -print)"
+  if [[ -z "$found" || "$(wc -l <<< "$found")" -ne 1 ]]; then
+    printf 'expected exactly one quarantined copy for %s, got:\n%s\n' "$source" "$found" >&2
+    exit 1
+  fi
+  SOURCE_PATH="$source" QUARANTINED_PATH="$found" SESSION_ID="$id" QUARANTINE_ROOT="$QUARANTINE_ROOT" node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const relative = path.relative(process.env.QUARANTINE_ROOT, process.env.QUARANTINED_PATH);
+const batch = relative.split(path.sep)[0];
+const manifest = JSON.parse(fs.readFileSync(path.join(process.env.QUARANTINE_ROOT, batch, 'manifest.json'), 'utf8'));
+const item = manifest.items.find((candidate) => candidate.id === process.env.SESSION_ID);
+if (manifest.status !== 'complete' || !item || item.originalPath !== process.env.SOURCE_PATH) {
+  throw new Error(`invalid quarantine manifest for ${process.env.SESSION_ID}`);
+}
+if (path.join(process.env.QUARANTINE_ROOT, batch, item.storedRelativePath) !== process.env.QUARANTINED_PATH) {
+  throw new Error(`storedRelativePath mismatch for ${process.env.SESSION_ID}`);
+}
+NODE
+}
+
+assert_not_quarantined() {
+  local source="$1"
+  if [[ -d "$QUARANTINE_ROOT" ]] && find "$QUARANTINE_ROOT" -type f -name "$(basename -- "$source")" -print -quit | grep -q .; then
+    printf 'file should not exist in quarantine: %s\n' "$source" >&2
     exit 1
   fi
 }
@@ -341,23 +381,27 @@ multi_unarchive_one_file="$(write_session archived_sessions "$uuid_ad" "$uuid_ad
 multi_unarchive_two_file="$(write_session archived_sessions "$uuid_ae" "$uuid_ae" "2026-07-20T00:02:04" "case P multi unarchive two")"
 batch_second_file="$(write_session sessions "$uuid_ag" "$uuid_ag" "2026-07-20T00:02:05" "case Q batch recheck second")"
 batch_first_file="$(write_session sessions "$uuid_af" "$uuid_af" "2026-07-20T00:02:06" "case Q batch recheck first")"
+force_delete_file="$(write_session sessions "$uuid_ai" "$uuid_ai" "2026-07-20T00:02:07" "case R force delete target")"
 
 run_tui "/case G archive target\nbq" "$TMP_DIR/archive.log"
 assert_fake_calls "archive $uuid_l"
 assert_contains "$(clean_log "$TMP_DIR/archive.log")" "$uuid_l"
 
-run_tui "/case G delete target\ndDELETE $uuid_m\nq" "$TMP_DIR/delete.log"
-assert_fake_calls "delete $uuid_m --force"
-assert_contains "$(clean_log "$TMP_DIR/delete.log")" "Required input: DELETE $uuid_m"
+run_tui "/case G delete target\ndQUARANTINE $uuid_m\nq" "$TMP_DIR/delete.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/delete.log")" "Required input: QUARANTINE $uuid_m"
+assert_quarantined_file "$delete_file" "$uuid_m"
 
 run_tui "\t/case G unarchive target\nuq" "$TMP_DIR/unarchive.log"
 assert_fake_calls "unarchive $uuid_n"
 assert_contains "$(clean_log "$TMP_DIR/unarchive.log")" "$uuid_n"
 
-run_tui "/case H multi\nAdDELETE $uuid_p $uuid_o\nq" "$TMP_DIR/multi-delete.log"
-assert_fake_calls $'delete '"$uuid_p"$' --force\ndelete '"$uuid_o"$' --force'
+run_tui "/case H multi\nAdQUARANTINE $uuid_p $uuid_o\nq" "$TMP_DIR/multi-delete.log"
+assert_no_fake_calls
 assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_p"
 assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_o"
+assert_quarantined_file "$multi_two_file" "$uuid_p"
+assert_quarantined_file "$multi_one_file" "$uuid_o"
 
 run_tui "/case O multi archive\nAbq" "$TMP_DIR/multi-archive.log"
 assert_fake_calls $'archive '"$uuid_ac"$'\narchive '"$uuid_ab"
@@ -375,7 +419,7 @@ assert_contains "$(clean_log "$TMP_DIR/unsafe-single-archive.log")" "Blocked arc
 
 run_tui "/case C mismatched ids\nd\nq" "$TMP_DIR/unsafe-single-delete.log"
 assert_no_fake_calls
-assert_contains "$(clean_log "$TMP_DIR/unsafe-single-delete.log")" "Blocked delete"
+assert_contains "$(clean_log "$TMP_DIR/unsafe-single-delete.log")" "Blocked quarantine"
 
 run_tui "/case D missing filename uuid\nb\nq" "$TMP_DIR/unsafe-missing-filename.log"
 assert_no_fake_calls
@@ -399,7 +443,7 @@ assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-archive.log")" "Blocked arch
 
 run_tui "/case I active\nAd\nq" "$TMP_DIR/unsafe-multi-delete.log"
 assert_no_fake_calls
-assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-delete.log")" "Blocked delete"
+assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-delete.log")" "Blocked quarantine"
 
 run_tui "\t/case I archived\nAu\nq" "$TMP_DIR/unsafe-multi-unarchive.log"
 assert_no_fake_calls
@@ -407,30 +451,42 @@ assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-unarchive.log")" "Blocked un
 
 run_tui "/case J cancel target\ndWRONG\nq" "$TMP_DIR/cancel-delete.log"
 assert_no_fake_calls
-assert_contains "$(clean_log "$TMP_DIR/cancel-delete.log")" "Delete cancelled"
+assert_contains "$(clean_log "$TMP_DIR/cancel-delete.log")" "Quarantine cancelled"
+[[ -e "$cancel_file" ]]
 
-run_tui "/case L terminal spoof\ndDELETE $uuid_u\nq" "$TMP_DIR/terminal-controls.log"
-assert_fake_calls "delete $uuid_u --force"
+run_tui "/case L terminal spoof\ndQUARANTINE $uuid_u\nq" "$TMP_DIR/terminal-controls.log"
+assert_no_fake_calls
+assert_quarantined_file "$terminal_control_file" "$uuid_u"
 if LC_ALL=C grep -q "$(printf '\033')\[2J" "$TMP_DIR/terminal-controls.log"; then
   printf 'transcript-provided terminal clear sequence reached TUI output\n' >&2
   exit 1
 fi
 
 start_identity_mutation_during_confirmation "$toctou_file" "$uuid_y" "$uuid_z"
-run_tui "/case M changed after confirmation\ndDELETE $uuid_y\n\nq" "$TMP_DIR/toctou.log"
+run_tui "/case M changed after confirmation\ndQUARANTINE $uuid_y\n\nq" "$TMP_DIR/toctou.log"
 wait "$MUTATOR_PID"
 assert_no_fake_calls
-assert_contains "$(clean_log "$TMP_DIR/toctou.log")" "Required input: DELETE $uuid_y"
-assert_contains "$(clean_log "$TMP_DIR/toctou.log")" "Blocked delete"
+assert_contains "$(clean_log "$TMP_DIR/toctou.log")" "Required input: QUARANTINE $uuid_y"
+assert_contains "$(clean_log "$TMP_DIR/toctou.log")" "Blocked quarantine"
 
 run_tui "/case Q batch recheck\nAbq" "$TMP_DIR/batch-recheck.log" "$batch_second_file" "$uuid_ag" "$uuid_ah"
 assert_fake_calls "archive $uuid_af"
 assert_contains "$(clean_log "$TMP_DIR/batch-recheck.log")" "Blocked archive"
 
+run_tui "/case R force delete target\ndFORCE DELETE $uuid_ai\nq" "$TMP_DIR/force-delete.log" "" "" "" "--force"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/force-delete.log")" "Required input: FORCE DELETE $uuid_ai"
+if [[ -e "$force_delete_file" ]]; then
+  printf 'force delete left source in place: %s\n' "$force_delete_file" >&2
+  exit 1
+fi
+assert_not_quarantined "$force_delete_file"
+
 printf '%s\n' "$archive_file" "$delete_file" "$unarchive_file" "$multi_one_file" "$multi_two_file" \
   "$safe_multi_file" "$unsafe_multi_file" "$cancel_file" "$unsafe_archived_file" "$safe_archived_file" \
   "$terminal_control_file" "$toctou_file" "$multi_archive_one_file" "$multi_archive_two_file" \
-  "$multi_unarchive_one_file" "$multi_unarchive_two_file" "$batch_first_file" "$batch_second_file" >/dev/null
+  "$multi_unarchive_one_file" "$multi_unarchive_two_file" "$batch_first_file" "$batch_second_file" \
+  "$force_delete_file" >/dev/null
 
 assert_no_fake_calls
 printf 'smoke ok\n'
