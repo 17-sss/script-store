@@ -22,7 +22,7 @@ fail() {
 assert_file_contains() {
   local file="$1"
   local expected="$2"
-  grep -Fq "$expected" "$file" || fail "$file does not contain: $expected"
+  grep -Fq -- "$expected" "$file" || fail "$file does not contain: $expected"
 }
 
 assert_count() {
@@ -31,7 +31,7 @@ assert_count() {
   local file="$3"
   local actual
 
-  actual="$(grep -Fc "$pattern" "$file" || true)"
+  actual="$(grep -Fc -- "$pattern" "$file" || true)"
   [ "$actual" = "$expected" ] || fail "expected $expected occurrences of '$pattern' in $file, got $actual"
 }
 
@@ -117,6 +117,29 @@ run_direct_case() {
   DIRECT_LOG="$case_root/codex.args"
 }
 
+assert_shortcut_conflict() {
+  local category="$1"
+  shift
+  local case_root="$TMP_ROOT/conflict-$category"
+  local conflict_status
+
+  mkdir -p "$case_root/project"
+  make_minimal_bin "$case_root/bin"
+  make_codex_mock "$case_root/bin"
+
+  set +e
+  (
+    cd "$case_root/project"
+    PATH="$case_root/bin" CX_CODEX_LOG="$case_root/codex.args" "$CX" "$@"
+  ) 2> "$case_root/stderr"
+  conflict_status=$?
+  set -e
+
+  [ "$conflict_status" -eq 2 ] || fail "$category shortcut conflict returned $conflict_status instead of 2"
+  assert_file_contains "$case_root/stderr" "cx: $category shortcuts cannot be combined"
+  [ ! -e "$case_root/codex.args" ] || fail "$category shortcut conflict launched Codex"
+}
+
 bash -n "$CX"
 bash -n "$INSTALLER"
 bash -n "$0"
@@ -127,11 +150,48 @@ else
   printf 'SKIP: ShellCheck is not installed\n'
 fi
 
+"$CX" --cx-help > "$TMP_ROOT/cx-help"
+assert_file_contains "$TMP_ROOT/cx-help" 'Usage: cx [CX_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
+assert_file_contains "$TMP_ROOT/cx-help" '--sol       --model gpt-5.6-sol'
+assert_file_contains "$TMP_ROOT/cx-help" '--safe       read-only + untrusted approvals'
+
 run_direct_case empty
 assert_args "$DIRECT_LOG" --no-alt-screen
 
-run_direct_case xhigh --xhigh
-assert_args "$DIRECT_LOG" --no-alt-screen -c 'model_reasoning_effort="xhigh"'
+for effort in low medium high xhigh max ultra; do
+  run_direct_case "reasoning-$effort" "--$effort"
+  assert_args "$DIRECT_LOG" --no-alt-screen -c "model_reasoning_effort=\"$effort\""
+done
+
+run_direct_case model-sol --sol
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-sol
+
+run_direct_case model-terra --terra
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-terra
+
+run_direct_case model-luna --luna
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-luna
+
+run_direct_case model-gpt55 --gpt55
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.5
+
+run_direct_case model-gpt54 --gpt54
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.4
+
+run_direct_case model-mini --mini
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.4-mini
+
+run_direct_case model-spark --spark
+assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.3-codex-spark
+
+run_direct_case permission-safe --safe
+assert_args "$DIRECT_LOG" --no-alt-screen --sandbox read-only --ask-for-approval untrusted
+
+run_direct_case permission-auto --auto
+assert_args "$DIRECT_LOG" --no-alt-screen --sandbox workspace-write --ask-for-approval on-request
+
+run_direct_case permission-full-auto --full-auto
+assert_args "$DIRECT_LOG" --no-alt-screen --sandbox workspace-write --ask-for-approval never
 
 run_direct_case madmax --madmax
 assert_args "$DIRECT_LOG" --no-alt-screen --yolo
@@ -139,11 +199,20 @@ assert_args "$DIRECT_LOG" --no-alt-screen --yolo
 run_direct_case combined --xhigh --madmax
 assert_args "$DIRECT_LOG" --no-alt-screen -c 'model_reasoning_effort="xhigh"' --yolo
 
+run_direct_case all-shortcuts --sol --high --auto 'prompt with spaces'
+assert_args "$DIRECT_LOG" \
+  --no-alt-screen \
+  --model gpt-5.6-sol \
+  -c 'model_reasoning_effort="high"' \
+  --sandbox workspace-write \
+  --ask-for-approval on-request \
+  'prompt with spaces'
+
 run_direct_case prompt --xhigh '현재 프로젝트의 테스트를 수정해줘'
 assert_args "$DIRECT_LOG" --no-alt-screen -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
 
-run_direct_case passthrough -- --xhigh --madmax
-assert_args "$DIRECT_LOG" --no-alt-screen -- --xhigh --madmax
+run_direct_case passthrough -- --sol --high --auto --madmax
+assert_args "$DIRECT_LOG" --no-alt-screen -- --sol --high --auto --madmax
 
 run_direct_case native --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
 assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
@@ -153,6 +222,10 @@ assert_args "$DIRECT_LOG" --no-alt-screen resume --last
 
 run_direct_case review review
 assert_args "$DIRECT_LOG" --no-alt-screen review
+
+assert_shortcut_conflict model --sol --terra
+assert_shortcut_conflict reasoning --low --high
+assert_shortcut_conflict permission --safe --auto
 
 # Calling the executable from zsh still dispatches through its Bash shebang.
 if command -v zsh >/dev/null 2>&1; then

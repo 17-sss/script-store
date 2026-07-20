@@ -2,6 +2,91 @@
 
 # Run Codex in a project-specific tmux session.
 
+print_cx_help() {
+  cat <<'EOF'
+Usage: cx [CX_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]
+
+cx shortcuts:
+  Models:
+    --sol       --model gpt-5.6-sol
+    --terra     --model gpt-5.6-terra
+    --luna      --model gpt-5.6-luna
+    --gpt55     --model gpt-5.5
+    --gpt54     --model gpt-5.4
+    --mini      --model gpt-5.4-mini
+    --spark     --model gpt-5.3-codex-spark
+
+  Reasoning (model support varies):
+    --low --medium --high --xhigh --max --ultra
+
+  Permission presets:
+    --safe       read-only + untrusted approvals
+    --auto       workspace-write + on-request approvals
+    --full-auto  workspace-write + no approval prompts
+    --madmax     --yolo (no sandbox or approval prompts)
+
+  Other:
+    --cx-help    Show this help
+    --           Stop interpreting cx shortcuts
+
+All other options are passed to Codex unchanged.
+EOF
+}
+
+shortcut_conflict() {
+  printf 'cx: %s shortcuts cannot be combined: %s and %s\n' "$1" "$2" "$3" >&2
+  exit 2
+}
+
+add_model_shortcut() {
+  local shortcut="$1"
+  local model="$2"
+
+  if [ -n "$model_shortcut" ]; then
+    shortcut_conflict model "$model_shortcut" "$shortcut"
+  fi
+  model_shortcut="$shortcut"
+  codex_args+=(--model "$model")
+}
+
+add_reasoning_shortcut() {
+  local shortcut="$1"
+  local effort="$2"
+
+  if [ -n "$reasoning_shortcut" ]; then
+    shortcut_conflict reasoning "$reasoning_shortcut" "$shortcut"
+  fi
+  reasoning_shortcut="$shortcut"
+  codex_args+=(
+    -c
+    "model_reasoning_effort=\"$effort\""
+  )
+}
+
+add_permission_shortcut() {
+  local shortcut="$1"
+
+  if [ -n "$permission_shortcut" ]; then
+    shortcut_conflict permission "$permission_shortcut" "$shortcut"
+  fi
+  permission_shortcut="$shortcut"
+
+  case "$shortcut" in
+    --safe)
+      codex_args+=(--sandbox read-only --ask-for-approval untrusted)
+      ;;
+    --auto)
+      codex_args+=(--sandbox workspace-write --ask-for-approval on-request)
+      ;;
+    --full-auto)
+      codex_args+=(--sandbox workspace-write --ask-for-approval never)
+      ;;
+    --madmax)
+      codex_args+=(--yolo)
+      ;;
+  esac
+}
+
 session_directory="${PWD##*/}"
 if [ -z "$session_directory" ]; then
   session_directory="/"
@@ -12,6 +97,9 @@ session="${session//[^A-Za-z0-9_-]/-}"
 
 codex_args=(--no-alt-screen)
 passthrough=0
+model_shortcut=
+reasoning_shortcut=
+permission_shortcut=
 
 for arg in "$@"; do
   if [ "$passthrough" -eq 1 ]; then
@@ -20,18 +108,40 @@ for arg in "$@"; do
   fi
 
   case "$arg" in
+    --cx-help)
+      print_cx_help
+      exit 0
+      ;;
     --)
       passthrough=1
       codex_args+=("$arg")
       ;;
-    --xhigh)
-      codex_args+=(
-        -c
-        'model_reasoning_effort="xhigh"'
-      )
+    --sol)
+      add_model_shortcut "$arg" gpt-5.6-sol
       ;;
-    --madmax)
-      codex_args+=(--yolo)
+    --terra)
+      add_model_shortcut "$arg" gpt-5.6-terra
+      ;;
+    --luna)
+      add_model_shortcut "$arg" gpt-5.6-luna
+      ;;
+    --gpt55)
+      add_model_shortcut "$arg" gpt-5.5
+      ;;
+    --gpt54)
+      add_model_shortcut "$arg" gpt-5.4
+      ;;
+    --mini)
+      add_model_shortcut "$arg" gpt-5.4-mini
+      ;;
+    --spark)
+      add_model_shortcut "$arg" gpt-5.3-codex-spark
+      ;;
+    --low|--medium|--high|--xhigh|--max|--ultra)
+      add_reasoning_shortcut "$arg" "${arg#--}"
+      ;;
+    --safe|--auto|--full-auto|--madmax)
+      add_permission_shortcut "$arg"
       ;;
     *)
       codex_args+=("$arg")

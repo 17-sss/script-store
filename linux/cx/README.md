@@ -32,21 +32,74 @@ source ~/.zshrc # zsh
 
 ```bash
 cx
-cx --xhigh
-cx --madmax
-cx --xhigh --madmax
-cx --model gpt-5.6-sol
+cx --sol --high --auto
+cx --terra --medium --safe
+cx --luna --max --full-auto
+cx --sol --ultra --madmax
 cx resume --last
 ```
 
 - 모든 실행에는 `--no-alt-screen`이 기본으로 추가됩니다.
-- `--xhigh`는 `-c 'model_reasoning_effort="xhigh"'`로 변환됩니다.
-- `--madmax`는 Codex의 `--yolo`로 변환됩니다. 승인 절차와 sandbox를 우회하므로 신뢰할 수 있는 작업에서만 사용하세요.
-- `--` 뒤의 `--xhigh`와 `--madmax`는 변환하지 않고 그대로 전달됩니다.
+- Codex 네이티브 옵션과 서브커맨드는 그대로 전달됩니다.
+- `--` 뒤의 값은 cx 편의 옵션으로 변환하지 않습니다.
 - tmux가 없으면 현재 터미널에서 Codex를 직접 실행합니다.
 - tmux 안에서는 nested attach 대신 새 세션으로 client를 전환합니다.
 
 세션 이름은 `codex-<현재 디렉터리>-<HHMMSS>` 형식이며 영문자, 숫자, `_`, `-` 이외의 문자는 `-`로 바뀝니다.
+
+## 편의 옵션
+
+현재 설치된 Codex가 노출하는 주요 모델을 짧게 선택할 수 있습니다.
+
+| cx 옵션 | Codex 변환 |
+| --- | --- |
+| `--sol` | `--model gpt-5.6-sol` |
+| `--terra` | `--model gpt-5.6-terra` |
+| `--luna` | `--model gpt-5.6-luna` |
+| `--gpt55` | `--model gpt-5.5` |
+| `--gpt54` | `--model gpt-5.4` |
+| `--mini` | `--model gpt-5.4-mini` |
+| `--spark` | `--model gpt-5.3-codex-spark` |
+
+생각 레벨은 `--low`, `--medium`, `--high`, `--xhigh`, `--max`, `--ultra`를 지원하며 각각 `model_reasoning_effort` 설정으로 변환됩니다. 선택한 모델이 해당 레벨을 지원하지 않으면 Codex가 오류를 반환합니다.
+
+권한 프리셋은 sandbox와 approval policy를 함께 설정합니다.
+
+| cx 옵션 | Sandbox | Approval |
+| --- | --- | --- |
+| `--safe` | `read-only` | `untrusted` |
+| `--auto` | `workspace-write` | `on-request` |
+| `--full-auto` | `workspace-write` | `never` |
+| `--madmax` | 없음 (`--yolo`) | 없음 (`--yolo`) |
+
+모델·생각 레벨·권한 프리셋은 각각 하나씩 조합할 수 있습니다.
+
+```bash
+cx --sol --xhigh --auto "현재 프로젝트의 테스트를 수정해줘"
+cx --terra --low --safe review
+cx --mini --high --full-auto resume --last
+```
+
+같은 종류의 편의 옵션을 둘 이상 지정하면 모호한 실행을 막기 위해 종료 코드 `2`로 실패합니다. Codex 네이티브 옵션을 직접 사용할 수도 있습니다.
+
+```bash
+cx --model custom-model \
+  -c 'model_reasoning_effort="high"' \
+  --sandbox workspace-write \
+  --ask-for-approval on-request
+```
+
+전체 편의 옵션은 다음 명령으로 확인합니다.
+
+```bash
+cx --cx-help
+```
+
+## 유지보수
+
+모델 slug, reasoning effort, sandbox 및 approval 옵션은 Codex 릴리스에 따라 바뀔 수 있습니다. `cx` 편의 옵션은 2주마다, 그리고 Codex CLI를 업데이트한 직후 점검합니다.
+
+검토 기준, 최신화 절차, 검증 명령과 Scheduled task용 프롬프트는 [MAINTENANCE.md](MAINTENANCE.md)에 있습니다. 향후 Codex가 `linux/cx/`를 수정할 때는 가까운 [AGENTS.md](AGENTS.md)의 호환성 규칙을 우선 적용합니다.
 
 ## 테스트
 
