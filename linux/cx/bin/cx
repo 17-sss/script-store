@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+# Run Codex in a project-specific tmux session.
+
+session_directory="${PWD##*/}"
+if [ -z "$session_directory" ]; then
+  session_directory="/"
+fi
+
+session="codex-${session_directory}-$(date +%H%M%S)"
+session="${session//[^A-Za-z0-9_-]/-}"
+
+codex_args=(--no-alt-screen)
+passthrough=0
+
+for arg in "$@"; do
+  if [ "$passthrough" -eq 1 ]; then
+    codex_args+=("$arg")
+    continue
+  fi
+
+  case "$arg" in
+    --)
+      passthrough=1
+      codex_args+=("$arg")
+      ;;
+    --xhigh)
+      codex_args+=(
+        -c
+        'model_reasoning_effort="xhigh"'
+      )
+      ;;
+    --madmax)
+      codex_args+=(--yolo)
+      ;;
+    *)
+      codex_args+=("$arg")
+      ;;
+  esac
+done
+
+if ! command -v codex >/dev/null 2>&1; then
+  printf 'cx: codex command not found\n' >&2
+  exit 127
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  printf 'cx: tmux not found; launching Codex directly\n' >&2
+  exec codex "${codex_args[@]}"
+fi
+
+if ! tmux new-session \
+  -d \
+  -s "$session" \
+  -c "$PWD" \
+  codex "${codex_args[@]}"
+then
+  exit 1
+fi
+
+if ! tmux set-option -t "$session" mouse on; then
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+# Do not preserve a dead pane even when the user's global tmux setting does.
+if ! tmux set-option -w -t "$session" remain-on-exit off; then
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+if [ -n "${TMUX:-}" ]; then
+  exec tmux switch-client -t "$session"
+fi
+
+exec tmux attach-session -t "$session"
