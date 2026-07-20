@@ -50,6 +50,20 @@ codex-session-manager | View: active | Scope: current folder | Marked: 0 | Sessi
 
 선택된 행이 하나라도 있으면 `b`, `u`, `d`는 **선택된 행 전체**에 적용됩니다. 선택된 행이 없으면 **현재 커서가 있는 행 하나**에 적용됩니다.
 
+## 세션 ID 안전 정책
+
+보관, 보관취소, 삭제 같은 변경 작업은 세션 ID를 안전하게 확인한 항목에만 실행됩니다.
+
+- 파일명이 정확히 `rollout-...-<UUID>.jsonl` 형식일 때만 끝의 UUID를 canonical ID 후보로 사용합니다.
+- transcript 안에서는 첫 번째 최상위 `session_meta.payload.id`만 확인합니다.
+- 파일명 UUID와 첫 번째 transcript UUID가 의미상 같아야 변경 작업이 가능합니다.
+- 뒤쪽에 부모 세션이나 이전 세션의 `session_meta`가 다시 등장해도 canonical ID를 덮어쓰지 않습니다.
+- UUID가 없거나, 형식이 틀리거나, 두 UUID가 불일치하거나, transcript를 안전하게 판별할 수 없으면 `unsafe`로 표시하고 변경 작업을 차단합니다.
+- 다중 선택에 unsafe 항목이 하나라도 포함되면 안전한 항목만 골라 실행하지 않고 전체 작업을 차단합니다.
+- 다중 작업은 전체 대상을 먼저 검증하고, 각 CLI 호출 직전에도 해당 transcript를 다시 읽습니다. 앞선 명령 실행 중 남은 세션 ID가 바뀌면 이후 명령을 중단하고 선택 상태를 유지합니다.
+
+unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력에서 차단 사유를 확인할 수 있습니다.
+
 ## 단축키
 
 | Key | 동작 |
@@ -78,18 +92,22 @@ codex-session-manager | View: active | Scope: current folder | Marked: 0 | Sessi
 한 개 삭제:
 
 ```txt
-DELETE 019efcef
+DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 ```
 
 여러 개 삭제:
 
 ```txt
-DELETE 3
+DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d 019efd17-ecd0-7302-b59e-df1cf20bb320
 ```
 
-여러 개 삭제에서 숫자는 현재 선택된 세션 개수입니다. 화면에 표시된 `Required input:` 뒤의 값을 그대로 입력하면 됩니다.
+삭제 확인에는 개수나 짧은 prefix가 아니라 화면에 표시된 대상 UUID 전체를 입력합니다. 화면에 표시된 `Required input:` 뒤의 값을 그대로 입력하면 됩니다.
 
-확인 후 각 세션에 대해 `codex delete <SESSION_UUID> --force`를 실행합니다.
+확인 입력 후 대상 파일을 다시 읽어 UUID 안전성을 재검증합니다. 그 사이 ID가 바뀌거나 unsafe 상태가 되면 CLI를 호출하지 않고 전체 삭제를 차단합니다. 재검증을 통과하면 각 세션에 대해 `codex delete <SESSION_UUID> --force`를 실행합니다.
+
+archive와 unarchive도 실행 전에 대상 UUID 목록을 터미널에 표시합니다.
+
+transcript에서 읽은 제목, 경로, source 같은 표시 문자열에서는 터미널 제어 시퀀스를 제거하므로 세션 내용이 확인 화면이나 TUI를 조작할 수 없습니다.
 
 ## Non-Interactive List Mode
 
@@ -126,3 +144,11 @@ codex archive <SESSION_UUID>
 codex delete <SESSION_UUID> --force
 codex unarchive <SESSION_UUID>
 ```
+
+## Tests
+
+```bash
+./smoke-test.sh
+```
+
+테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. mutation 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행합니다.

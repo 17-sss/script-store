@@ -8,8 +8,15 @@ const readline = require('readline');
 const {spawnSync} = require('child_process');
 
 const APP_NAME = 'codex-session-manager';
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const UUID_EXACT_RE = new RegExp(`^${UUID_PATTERN}$`, 'i');
+const FILENAME_UUID_RE = new RegExp(`^rollout-.+-(${UUID_PATTERN})\\.jsonl$`, 'i');
 const PREVIEW_BYTES = 1024 * 1024;
+const OSC_RE = /\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g;
+const CONTROL_STRING_RE = /\x1b[PX^_][\s\S]*?(?:\x1b\\|$)/g;
+const CSI_RE = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g;
+const ESCAPE_RE = /\x1b(?:[ -/]*[@-~]|.)/g;
+const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 
 const colors = {
   reset: '\x1b[0m',
@@ -341,12 +348,14 @@ async function archiveSelected(state) {
     state.status = 'Selected session is already archived';
     return;
   }
-  const entries = actionTargetEntries(state);
-  if (entries.length === 0) {
+  const entries = await checkedMutationTargets(state, actionTargetEntries(state), 'archive');
+  if (!entries || entries.length === 0) {
     return;
   }
-  await runCodexBatch(state, entries, (entry) => ['archive', entry.id], 'Archived');
-  state.selected.clear();
+  const result = await runCodexBatch(state, entries, (entry) => ['archive', entry.canonicalId], 'Archived');
+  if (!result.blocked) {
+    state.selected.clear();
+  }
   refresh(state);
 }
 
@@ -355,18 +364,20 @@ async function unarchiveSelected(state) {
     state.status = 'Selected session is already active';
     return;
   }
-  const entries = actionTargetEntries(state);
-  if (entries.length === 0) {
+  const entries = await checkedMutationTargets(state, actionTargetEntries(state), 'unarchive');
+  if (!entries || entries.length === 0) {
     return;
   }
-  await runCodexBatch(state, entries, (entry) => ['unarchive', entry.id], 'Unarchived');
-  state.selected.clear();
+  const result = await runCodexBatch(state, entries, (entry) => ['unarchive', entry.canonicalId], 'Unarchived');
+  if (!result.blocked) {
+    state.selected.clear();
+  }
   refresh(state);
 }
 
 async function deleteSelected(state) {
-  const entries = actionTargetEntries(state);
-  if (entries.length === 0) {
+  let entries = await checkedMutationTargets(state, actionTargetEntries(state), 'delete');
+  if (!entries || entries.length === 0) {
     return;
   }
 
@@ -378,28 +389,88 @@ async function deleteSelected(state) {
     return;
   }
 
-  await runCodexBatch(state, entries, (entry) => ['delete', entry.id, '--force'], 'Deleted');
-  state.selected.clear();
+  entries = await checkedMutationTargets(state, entries, 'delete');
+  if (!entries || entries.length === 0) {
+    return;
+  }
+
+  const result = await runCodexBatch(state, entries, (entry) => ['delete', entry.canonicalId, '--force'], 'Deleted');
+  if (!result.blocked) {
+    state.selected.clear();
+  }
   refresh(state);
 }
 
 function deleteConfirmationText(entries) {
-  return entries.length === 1
-    ? `DELETE ${entries[0].id.slice(0, 8)}`
-    : `DELETE ${entries.length}`;
+  return `DELETE ${entries.map((entry) => entry.canonicalId).join(' ')}`;
 }
 
 function deleteConfirmationPrompt(entries, expected) {
-  const target = entries.length === 1
-    ? entries[0].id
-    : `${entries.length} selected sessions`;
+  const targetLines = entries.map((entry, index) => `  ${index + 1}. ${entry.canonicalId}  ${entry.summary}`);
   return [
     danger('Permanent delete confirmation'),
-    `${strong('Target:')} ${target}`,
+    `${strong('Targets:')}`,
+    ...targetLines,
     `${strong('Required input:')} ${requiredInput(expected)}`,
     dim('This will run codex delete --force for the target session(s).'),
     `${keyText('> ')}`
   ].join('\n');
+}
+
+async function checkedMutationTargets(state, entries, action) {
+  if (entries.length === 0) {
+    return [];
+  }
+
+  const checked = [];
+  const unsafe = [];
+  for (const entry of entries) {
+    const fresh = readEntry(entry.file, entry.state);
+    const reason = mutationBlockReason(entry, fresh);
+    if (reason) {
+      unsafe.push({
+        entry: fresh || entry,
+        reason,
+      });
+    } else {
+      checked.push(fresh);
+    }
+  }
+
+  if (unsafe.length > 0) {
+    await showBlockedMutation(state, action, unsafe);
+    state.status = `Blocked ${action}: unsafe session selected`;
+    return null;
+  }
+
+  return checked;
+}
+
+function mutationBlockReason(original, fresh) {
+  if (!original.mutationSafe) {
+    return original.unsafeReason || 'session identity is unsafe';
+  }
+  if (!fresh) {
+    return 'session transcript could not be read before mutation';
+  }
+  if (!fresh.mutationSafe) {
+    return fresh.unsafeReason || 'session identity is unsafe';
+  }
+  if (!fresh.canonicalId || fresh.canonicalId !== original.canonicalId) {
+    return 'session identity changed before mutation';
+  }
+  return '';
+}
+
+async function showBlockedMutation(state, action, unsafe) {
+  const lines = [
+    danger(`Blocked ${action}: unsafe session selected`),
+    dim('No Codex CLI command was executed. Clear the selection and choose only safe sessions.'),
+    '',
+    ...unsafe.map(({entry, reason}, index) => `${index + 1}. ${entry.id}  ${sanitizeTerminalText(reason)}`),
+    '',
+  ];
+  await promptLine(state, `${lines.join('\n')}${keyText('Press Enter to return: ')}`);
 }
 
 async function runCodex(state, args, successMessage) {
@@ -414,11 +485,24 @@ async function runCodex(state, args, successMessage) {
 async function runCodexBatch(state, entries, argsForEntry, verb) {
   suspendTui(state);
   console.log('');
+  console.log(`${verb} target${entries.length === 1 ? '' : 's'}:`);
+  for (const entry of entries) {
+    console.log(`- ${entry.canonicalId}  ${sanitizeTerminalText(entry.summary)}`);
+  }
+  console.log('');
 
   let succeeded = 0;
   let failed = 0;
+  let blocked = null;
   for (const entry of entries) {
-    const args = argsForEntry(entry);
+    const fresh = readEntry(entry.file, entry.state);
+    const reason = mutationBlockReason(entry, fresh);
+    if (reason) {
+      blocked = {entry: fresh || entry, reason};
+      break;
+    }
+
+    const args = argsForEntry(fresh);
     console.log(`$ codex ${args.join(' ')}`);
     const result = spawnSync('codex', args, {stdio: 'inherit'});
     if (result.status === 0) {
@@ -428,10 +512,25 @@ async function runCodexBatch(state, entries, argsForEntry, verb) {
     }
   }
 
+  if (blocked) {
+    const action = argsForEntry(blocked.entry)[0];
+    console.log('');
+    console.log(`Blocked ${action}: ${blocked.entry.id}  ${sanitizeTerminalText(blocked.reason)}`);
+  }
+
   resumeTui(state);
-  state.status = failed === 0
-    ? `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}`
-    : `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}, ${failed} failed`;
+  if (blocked) {
+    const action = argsForEntry(blocked.entry)[0];
+    const completed = succeeded + failed;
+    state.status = completed === 0
+      ? `Blocked ${action}: session identity changed before execution`
+      : `Blocked ${action} after ${completed} command${completed === 1 ? '' : 's'}: remaining sessions were not executed`;
+  } else {
+    state.status = failed === 0
+      ? `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}`
+      : `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}, ${failed} failed`;
+  }
+  return {blocked: Boolean(blocked), succeeded, failed};
 }
 
 async function promptLine(state, prompt) {
@@ -529,7 +628,7 @@ function render(state) {
     }
 
     const actualIndex = start + index;
-    const line = formatTuiLine(entry, state.options.cwd, width, state.selected.has(entry.id));
+    const line = formatTuiLine(entry, state.options.cwd, width, state.selected.has(entry.key));
     if (actualIndex === state.cursor) {
       lines.push(color(line, 'inverse'));
     } else {
@@ -540,9 +639,10 @@ function render(state) {
   const selected = entries[state.cursor];
   lines.push(dim(''.padEnd(width, '-').slice(0, width)));
   if (selected) {
-    lines.push(truncate(`id: ${selected.id}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
+    const safety = selected.mutationSafe ? 'safe' : `blocked: ${selected.unsafeReason}`;
+    lines.push(truncate(`id: ${selected.id}  safety: ${safety}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
     lines.push(truncate(`cwd: ${selected.cwd || '(unknown)'}`, width));
-    lines.push(truncate(`file: ${selected.file}`, width));
+    lines.push(truncate(`file: ${sanitizeTerminalText(selected.file)}`, width));
     lines.push(truncate(`prompt: ${selected.summary}`, width));
   } else {
     lines.push('No sessions in this view.');
@@ -558,7 +658,7 @@ function render(state) {
 
 function statusColor(status) {
   const normalized = status.toLowerCase();
-  if (normalized.includes('failed') || normalized.startsWith('delete cancelled')) {
+  if (normalized.includes('failed') || normalized.startsWith('delete cancelled') || normalized.startsWith('blocked')) {
     return 'red';
   }
   if (
@@ -600,7 +700,7 @@ function selectedEntry(state) {
 }
 
 function selectedEntries(state) {
-  return currentEntries(state).filter((entry) => state.selected.has(entry.id));
+  return currentEntries(state).filter((entry) => state.selected.has(entry.key));
 }
 
 function actionTargetEntries(state) {
@@ -615,11 +715,11 @@ function toggleSelected(state) {
     return;
   }
 
-  if (state.selected.has(entry.id)) {
-    state.selected.delete(entry.id);
+  if (state.selected.has(entry.key)) {
+    state.selected.delete(entry.key);
     state.status = `Unselected ${entry.id}`;
   } else {
-    state.selected.add(entry.id);
+    state.selected.add(entry.key);
     state.status = `Selected ${entry.id}`;
   }
 }
@@ -630,15 +730,15 @@ function toggleAllVisible(state) {
     return;
   }
 
-  const allSelected = entries.every((entry) => state.selected.has(entry.id));
+  const allSelected = entries.every((entry) => state.selected.has(entry.key));
   if (allSelected) {
     for (const entry of entries) {
-      state.selected.delete(entry.id);
+      state.selected.delete(entry.key);
     }
     state.status = `Unselected ${entries.length} visible sessions`;
   } else {
     for (const entry of entries) {
-      state.selected.add(entry.id);
+      state.selected.add(entry.key);
     }
     state.status = `Selected ${entries.length} visible sessions`;
   }
@@ -651,10 +751,10 @@ function clearSelection(state) {
 }
 
 function pruneSelection(state) {
-  const visibleIds = new Set(currentEntries(state).map((entry) => entry.id));
-  for (const id of state.selected) {
-    if (!visibleIds.has(id)) {
-      state.selected.delete(id);
+  const visibleKeys = new Set(currentEntries(state).map((entry) => entry.key));
+  for (const key of state.selected) {
+    if (!visibleKeys.has(key)) {
+      state.selected.delete(key);
     }
   }
 }
@@ -674,10 +774,12 @@ function applyFilters(entries, options, query = '') {
     }
     const haystack = [
       entry.id,
+      entry.canonicalId,
       entry.cwd,
       entry.source,
       entry.summary,
       entry.file,
+      entry.unsafeReason,
     ].join(' ').toLowerCase();
     return haystack.includes(normalizedQuery);
   });
@@ -728,16 +830,32 @@ function walkJsonl(root) {
 
 function readEntry(file, state) {
   const stat = safeStat(file);
-  const preview = readPreview(file);
-  const lines = preview.split(/\r?\n/);
-  const fallbackId = extractId(file);
-  let id = fallbackId;
+  const preview = safeReadPreview(file);
+  const filenameId = extractFilenameUuid(file);
   let timestamp = stat ? stat.mtimeMs : 0;
   let cwd = '';
   let source = '';
   let summary = '';
   let role = '';
   let nickname = '';
+
+  if (!preview.ok) {
+    const identity = unsafeIdentity(filenameId, '', `transcript could not be read: ${preview.error}`);
+    return buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname});
+  }
+
+  const lines = preview.text.split(/\r?\n/);
+  const firstMeta = readFirstSessionMeta(lines);
+  const identity = decideSessionIdentity(filenameId, firstMeta);
+
+  if (firstMeta.payload) {
+    const payload = firstMeta.payload;
+    cwd = payload.cwd || cwd;
+    timestamp = Date.parse(payload.timestamp || firstMeta.timestamp) || timestamp;
+    role = payload.agent_role || role;
+    nickname = payload.agent_nickname || nickname;
+    source = formatSource(payload) || source;
+  }
 
   for (const line of lines) {
     if (!line.trim()) {
@@ -749,17 +867,6 @@ function readEntry(file, state) {
       continue;
     }
 
-    if (item.type === 'session_meta' && item.payload) {
-      const payload = item.payload;
-      id = payload.id || id;
-      cwd = payload.cwd || cwd;
-      timestamp = Date.parse(payload.timestamp || item.timestamp) || timestamp;
-      role = payload.agent_role || role;
-      nickname = payload.agent_nickname || nickname;
-      source = formatSource(payload) || source;
-      continue;
-    }
-
     if (!summary && item.type === 'response_item' && item.payload?.type === 'message') {
       const candidate = cleanPrompt(extractMessageText(item.payload));
       if (candidate) {
@@ -768,33 +875,42 @@ function readEntry(file, state) {
     }
   }
 
-  if (!id) {
-    return null;
-  }
+  return buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname});
+}
 
+function buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname}) {
   if (!source) {
     source = role || nickname ? `subagent/${role || 'agent'}${nickname ? `/${nickname}` : ''}` : 'unknown';
   }
 
   return {
-    id,
+    key: file,
+    id: identity.displayId,
+    canonicalId: identity.canonicalId,
+    mutationSafe: identity.mutationSafe,
+    unsafeReason: sanitizeTerminalText(identity.unsafeReason),
     state,
     file,
-    cwd,
-    source,
-    summary: summary || '(no prompt preview)',
+    cwd: sanitizeTerminalText(cwd),
+    source: sanitizeTerminalText(source),
+    summary: sanitizeTerminalText(summary) || '(no prompt preview)',
     time: timestamp,
   };
 }
 
-function readPreview(file) {
-  const fd = fs.openSync(file, 'r');
+function safeReadPreview(file) {
+  let fd;
   try {
+    fd = fs.openSync(file, 'r');
     const buffer = Buffer.alloc(PREVIEW_BYTES);
     const bytesRead = fs.readSync(fd, buffer, 0, PREVIEW_BYTES, 0);
-    return buffer.toString('utf8', 0, bytesRead);
+    return {ok: true, text: buffer.toString('utf8', 0, bytesRead)};
+  } catch (error) {
+    return {ok: false, text: '', error: error.message};
   } finally {
-    fs.closeSync(fd);
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
   }
 }
 
@@ -814,9 +930,77 @@ function safeJsonParse(line) {
   }
 }
 
-function extractId(value) {
-  const match = value.match(UUID_RE);
-  return match ? match[0] : '';
+function extractFilenameUuid(file) {
+  const match = path.basename(file).match(FILENAME_UUID_RE);
+  return match ? normalizeUuid(match[1]) : '';
+}
+
+function readFirstSessionMeta(lines) {
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const item = safeJsonParse(line);
+    if (!item) {
+      return {id: '', payload: null, timestamp: '', unsafeReason: 'malformed JSON before first session_meta'};
+    }
+    if (item.type !== 'session_meta') {
+      continue;
+    }
+
+    const payload = item.payload || null;
+    if (!payload || typeof payload.id !== 'string' || !payload.id.trim()) {
+      return {id: '', payload, timestamp: item.timestamp || '', unsafeReason: 'first session_meta payload.id is missing'};
+    }
+
+    const id = normalizeUuid(payload.id);
+    if (!id) {
+      return {id: '', payload, timestamp: item.timestamp || '', unsafeReason: 'first session_meta payload.id is not a valid UUID'};
+    }
+
+    return {id, payload, timestamp: item.timestamp || '', unsafeReason: ''};
+  }
+
+  return {id: '', payload: null, timestamp: '', unsafeReason: 'first session_meta payload.id was not found'};
+}
+
+function decideSessionIdentity(filenameId, firstMeta) {
+  if (!filenameId) {
+    return unsafeIdentity('', firstMeta.id, 'filename UUID is missing or invalid');
+  }
+  if (firstMeta.unsafeReason) {
+    return unsafeIdentity(filenameId, firstMeta.id, firstMeta.unsafeReason);
+  }
+  if (!firstMeta.id) {
+    return unsafeIdentity(filenameId, '', 'first session_meta payload.id was not found');
+  }
+  if (filenameId !== firstMeta.id) {
+    return unsafeIdentity(filenameId, firstMeta.id, `filename UUID and first session_meta UUID mismatch (${filenameId} != ${firstMeta.id})`);
+  }
+  return {
+    displayId: filenameId,
+    canonicalId: filenameId,
+    mutationSafe: true,
+    unsafeReason: '',
+  };
+}
+
+function unsafeIdentity(filenameId, transcriptId, unsafeReason) {
+  return {
+    displayId: filenameId || transcriptId || '(unsafe)',
+    canonicalId: '',
+    mutationSafe: false,
+    unsafeReason,
+  };
+}
+
+function normalizeUuid(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  const trimmed = value.trim();
+  return UUID_EXACT_RE.test(trimmed) ? trimmed.toLowerCase() : '';
 }
 
 function formatSource(payload) {
@@ -854,6 +1038,8 @@ function cleanPrompt(text) {
   if (!text) {
     return '';
   }
+
+  text = stripTerminalControls(text);
 
   const marker = '## My request for Codex:';
   const markerIndex = text.indexOf(marker);
@@ -926,6 +1112,7 @@ function formatPlainLine(entry, cwd) {
     formatDate(entry.time),
     entry.id,
     `[${entry.state}]`,
+    entry.mutationSafe ? '[safe]' : `[unsafe: ${entry.unsafeReason}]`,
     `[${entry.source}]`,
     relativePath(entry.cwd, cwd),
     entry.summary,
@@ -933,13 +1120,15 @@ function formatPlainLine(entry, cwd) {
 }
 
 function formatTuiLine(entry, cwd, width, selected) {
+  const safety = entry.mutationSafe ? '   ' : '[!]';
   const fields = [
     selected ? '[x]' : '[ ]',
+    safety,
     formatDate(entry.time),
     entry.id.slice(0, 8),
     fixed(entry.source, 18),
     fixed(relativePath(entry.cwd, cwd), 32),
-    entry.summary,
+    entry.mutationSafe ? entry.summary : `unsafe: ${entry.unsafeReason}`,
   ];
   return truncate(fields.join('  '), width);
 }
@@ -1025,7 +1214,7 @@ function truncateStyled(value, width) {
 }
 
 function truncatePlain(value, width) {
-  const text = String(value || '').replace(/\s+/g, ' ');
+  const text = sanitizeTerminalText(value);
   if (displayWidth(text) <= width) {
     return text;
   }
@@ -1089,7 +1278,20 @@ function charWidth(char) {
 }
 
 function stripAnsi(value) {
-  return String(value || '').replace(ANSI_RE, '');
+  return stripTerminalControls(value).replace(ANSI_RE, '');
+}
+
+function stripTerminalControls(value) {
+  return String(value || '')
+    .replace(OSC_RE, '')
+    .replace(CONTROL_STRING_RE, '')
+    .replace(CSI_RE, '')
+    .replace(ESCAPE_RE, '')
+    .replace(CONTROL_RE, ' ');
+}
+
+function sanitizeTerminalText(value) {
+  return stripTerminalControls(value).replace(/\s+/g, ' ').trim();
 }
 
 function clamp(value, min, max) {

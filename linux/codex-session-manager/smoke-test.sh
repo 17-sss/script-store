@@ -2,56 +2,435 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-TMP_DIR="$(mktemp -d)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+REAL_HOME="${HOME:-}"
+REAL_CODEX_HOME="${CODEX_HOME:-}"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-session-manager-test.XXXXXX")"
+TEST_HOME="$TMP_DIR/home"
+TEST_CODEX_HOME="$TMP_DIR/codex-home"
+TEST_BIN="$TMP_DIR/bin"
+FAKE_CODEX_LOG="$TMP_DIR/fake-codex.log"
+PATH_WITH_FAKE="$TEST_BIN:$PATH"
+PROJECT_CWD="/tmp/codex-session-manager-project"
 
-cleanup() {
-  rm -rf -- "$TMP_DIR"
-}
-trap cleanup EXIT
-
-mkdir -p "$TMP_DIR/sessions/2026/06/25"
-mkdir -p "$TMP_DIR/archived_sessions/2026/06/25"
-
-cat > "$TMP_DIR/sessions/2026/06/25/rollout-2026-06-25T12-00-00-019f0000-0000-7000-8000-000000000001.jsonl" <<'JSONL'
-{"timestamp":"2026-06-25T12:00:00.000Z","type":"session_meta","payload":{"id":"019f0000-0000-7000-8000-000000000001","timestamp":"2026-06-25T12:00:00.000Z","cwd":"/tmp/project","originator":"Codex CLI","source":"cli","thread_source":"user"}}
-{"timestamp":"2026-06-25T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"active fixture prompt"}]}}
-JSONL
-
-cat > "$TMP_DIR/sessions/2026/06/25/rollout-2026-06-25T12-00-30-019f0000-0000-7000-8000-000000000003.jsonl" <<'JSONL'
-{"timestamp":"2026-06-25T12:00:30.000Z","type":"session_meta","payload":{"id":"019f0000-0000-7000-8000-000000000003","timestamp":"2026-06-25T12:00:30.000Z","cwd":"/tmp/project","originator":"Codex CLI","source":"cli","thread_source":"user"}}
-{"timestamp":"2026-06-25T12:00:31.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second active fixture prompt"}]}}
-JSONL
-
-cat > "$TMP_DIR/archived_sessions/2026/06/25/rollout-2026-06-25T12-01-00-019f0000-0000-7000-8000-000000000002.jsonl" <<'JSONL'
-{"timestamp":"2026-06-25T12:01:00.000Z","type":"session_meta","payload":{"id":"019f0000-0000-7000-8000-000000000002","timestamp":"2026-06-25T12:01:00.000Z","cwd":"/tmp/project/subdir","originator":"Codex Desktop","source":"app","thread_source":"user"}}
-{"timestamp":"2026-06-25T12:01:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"archived fixture prompt"}]}}
-JSONL
-
-output="$(CODEX_HOME="$TMP_DIR" "$SCRIPT_DIR/codex-session-manager.js" --cwd /tmp/project --list all)"
-
-printf '%s\n' "$output" | grep -q "active sessions (2)"
-printf '%s\n' "$output" | grep -q "archived sessions (1)"
-printf '%s\n' "$output" | grep -q "active fixture prompt"
-printf '%s\n' "$output" | grep -q "second active fixture prompt"
-printf '%s\n' "$output" | grep -q "archived fixture prompt"
-
-json_output="$(CODEX_HOME="$TMP_DIR" "$SCRIPT_DIR/codex-session-manager.js" --cwd /tmp/project --list all --json)"
-printf '%s\n' "$json_output" | grep -q '"active"'
-printf '%s\n' "$json_output" | grep -q '"archived"'
-
-if command -v script >/dev/null 2>&1; then
-  tui_log="$TMP_DIR/tui.log"
-  { printf 'A'; sleep 0.2; printf 'q'; } \
-    | script -q -e -O "$tui_log" -c "stty cols 80 rows 20; CODEX_HOME=$TMP_DIR $SCRIPT_DIR/codex-session-manager.js --cwd /tmp/project" >/dev/null
-  clean_tui="$(tr -d '\r' < "$tui_log" | sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g')"
-  printf '%s\n' "$clean_tui" | grep -q "Marked: 2"
-  printf '%s\n' "$clean_tui" | grep -q "Move: Up/Down,j/k"
-  printf '%s\n' "$clean_tui" | grep -q "Act marked/cursor: b=archive"
-  LC_ALL=C grep -q "$(printf '\033')\\[31m" "$tui_log"
-  if LC_ALL=C grep -q "$(printf '\033')\\[2J" "$tui_log"; then
-    printf 'unexpected full-screen clear escape in TUI render\n' >&2
+safe_cleanup() {
+  local status=$?
+  if [[ -z "${TMP_DIR:-}" || "$TMP_DIR" == "/" ]]; then
+    printf 'refusing to clean unsafe tmp path: %s\n' "${TMP_DIR:-}" >&2
     exit 1
   fi
+  if [[ -n "$REAL_HOME" && "$TMP_DIR" == "$REAL_HOME" ]]; then
+    printf 'refusing to clean real HOME: %s\n' "$TMP_DIR" >&2
+    exit 1
+  fi
+  if [[ -n "$REAL_CODEX_HOME" && "$TMP_DIR" == "$REAL_CODEX_HOME" ]]; then
+    printf 'refusing to clean real CODEX_HOME: %s\n' "$TMP_DIR" >&2
+    exit 1
+  fi
+  if [[ "$TMP_DIR" == "$REPO_ROOT" ]]; then
+    printf 'refusing to clean repository root: %s\n' "$TMP_DIR" >&2
+    exit 1
+  fi
+  if [[ -d "$TMP_DIR" ]]; then
+    rm -rf -- "$TMP_DIR"
+  fi
+  exit "$status"
+}
+trap safe_cleanup EXIT
+
+mkdir -p "$TEST_HOME" "$TEST_CODEX_HOME/sessions/2026/07/20" \
+  "$TEST_CODEX_HOME/archived_sessions/2026/07/20" \
+  "$TMP_DIR/xdg-config" "$TMP_DIR/xdg-data" "$TMP_DIR/xdg-state" "$TMP_DIR/xdg-cache" \
+  "$TEST_BIN"
+: > "$FAKE_CODEX_LOG"
+
+cat > "$TEST_BIN/codex" <<'FAKE_CODEX'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_CODEX_LOG"
+if [[ -n "${FAKE_CODEX_MUTATE_FILE:-}" && "$(wc -l < "$FAKE_CODEX_LOG")" -eq 1 ]]; then
+  sed "1s/$FAKE_CODEX_OLD_ID/$FAKE_CODEX_NEW_ID/" "$FAKE_CODEX_MUTATE_FILE" > "$FAKE_CODEX_MUTATE_FILE.next"
+  mv -- "$FAKE_CODEX_MUTATE_FILE.next" "$FAKE_CODEX_MUTATE_FILE"
+fi
+FAKE_CODEX
+chmod +x "$TEST_BIN/codex"
+
+isolated_env() {
+  env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME \
+    HOME="$TEST_HOME" \
+    CODEX_HOME="$TEST_CODEX_HOME" \
+    XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
+    XDG_DATA_HOME="$TMP_DIR/xdg-data" \
+    XDG_STATE_HOME="$TMP_DIR/xdg-state" \
+    XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
+    FAKE_CODEX_LOG="$FAKE_CODEX_LOG" \
+    PATH="$PATH_WITH_FAKE" \
+    "$@"
+}
+
+if [[ "$(isolated_env bash -c 'command -v codex')" != "$TEST_BIN/codex" ]]; then
+  printf 'fake codex is not first on PATH\n' >&2
+  exit 1
 fi
 
+uuid_a="019f1000-0000-7000-8000-000000000001"
+uuid_b="019f1000-0000-7000-8000-000000000002"
+uuid_c="019f1000-0000-7000-8000-000000000003"
+uuid_d="019f1000-0000-7000-8000-000000000004"
+uuid_e="019f1000-0000-7000-8000-000000000005"
+uuid_f="019f1000-0000-7000-8000-000000000006"
+uuid_g="019f1000-0000-7000-8000-000000000007"
+uuid_h="019f1000-0000-7000-8000-000000000008"
+uuid_i="019f1000-0000-7000-8000-000000000009"
+uuid_j="019f1000-0000-7000-8000-000000000010"
+uuid_k="019f1000-0000-7000-8000-000000000011"
+uuid_l="019f1000-0000-7000-8000-000000000012"
+uuid_m="019f1000-0000-7000-8000-000000000013"
+uuid_n="019f1000-0000-7000-8000-000000000014"
+uuid_o="019f1000-0000-7000-8000-000000000015"
+uuid_p="019f1000-0000-7000-8000-000000000016"
+uuid_q="019f1000-0000-7000-8000-000000000017"
+uuid_r="019f1000-0000-7000-8000-000000000018"
+uuid_s="019f1000-0000-7000-8000-000000000019"
+uuid_t="019f1000-0000-7000-8000-000000000020"
+uuid_u="019f1000-0000-7000-8000-000000000021"
+uuid_v="019f1000-0000-7000-8000-000000000022"
+uuid_w="019f1000-0000-7000-8000-000000000023"
+uuid_x="019f1000-0000-7000-8000-000000000024"
+uuid_y="019f1000-0000-7000-8000-000000000025"
+uuid_z="019f1000-0000-7000-8000-000000000026"
+uuid_aa="019f1000-0000-7000-8000-000000000027"
+uuid_ab="019f1000-0000-7000-8000-000000000028"
+uuid_ac="019f1000-0000-7000-8000-000000000029"
+uuid_ad="019f1000-0000-7000-8000-000000000030"
+uuid_ae="019f1000-0000-7000-8000-000000000031"
+uuid_af="019f1000-0000-7000-8000-000000000032"
+uuid_ag="019f1000-0000-7000-8000-000000000033"
+uuid_ah="019f1000-0000-7000-8000-000000000034"
+
+write_session() {
+  local area="$1"
+  local file_id="$2"
+  local meta_id="$3"
+  local timestamp="$4"
+  local prompt="$5"
+  local file="$TEST_CODEX_HOME/$area/2026/07/20/rollout-${timestamp//:/-}-$file_id.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$meta_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
+JSONL
+  printf '%s\n' "$file"
+}
+
+append_parent_meta() {
+  local file="$1"
+  local parent_id="$2"
+  local timestamp="$3"
+  cat >> "$file" <<JSONL
+{"timestamp":"$timestamp.900Z","type":"session_meta","payload":{"id":"$parent_id","timestamp":"$timestamp.900Z","cwd":"$PROJECT_CWD/parent","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+JSONL
+}
+
+write_session_missing_payload_id() {
+  local file_id="$1"
+  local timestamp="$2"
+  local prompt="$3"
+  local file="$TEST_CODEX_HOME/sessions/2026/07/20/rollout-${timestamp//:/-}-$file_id.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
+JSONL
+}
+
+write_no_filename_uuid() {
+  local meta_id="$1"
+  local timestamp="$2"
+  local prompt="$3"
+  local file="$TEST_CODEX_HOME/sessions/2026/07/20/rollout-no-valid-uuid.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$meta_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
+JSONL
+}
+
+write_non_rollout_filename() {
+  local meta_id="$1"
+  local timestamp="$2"
+  local prompt="$3"
+  local file="$TEST_CODEX_HOME/sessions/2026/07/20/backup-$meta_id.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$meta_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
+JSONL
+}
+
+write_subagent_with_parent_meta() {
+  local file_id="$1"
+  local parent_id="$2"
+  local timestamp="$3"
+  local prompt="$4"
+  local file="$TEST_CODEX_HOME/sessions/2026/07/20/rollout-${timestamp//:/-}-$file_id.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$file_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","agent_role":"code-reviewer","agent_nickname":"Ada","source":{"subagent":{"thread_spawn":{"agent_role":"code-reviewer","agent_nickname":"Ada"}}}}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
+{"timestamp":"$timestamp.900Z","type":"session_meta","payload":{"id":"$parent_id","timestamp":"$timestamp.900Z","cwd":"$PROJECT_CWD/parent","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+JSONL
+}
+
+write_session_with_terminal_controls() {
+  local file_id="$1"
+  local timestamp="$2"
+  local file="$TEST_CODEX_HOME/sessions/2026/07/20/rollout-${timestamp//:/-}-$file_id.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$file_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"case L \\u001b[2J\\u001b]0;forged title\\u0007terminal\\tspoof"}]}}
+JSONL
+  printf '%s\n' "$file"
+}
+
+assert_json_entry() {
+  local json="$1"
+  local prompt="$2"
+  local expression="$3"
+  JSON_INPUT="$json" PROMPT="$prompt" EXPRESSION="$expression" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+const entries = [...(data.active || []), ...(data.archived || [])];
+const entry = entries.find((item) => item.summary === process.env.PROMPT);
+if (!entry) {
+  throw new Error(`missing entry for prompt: ${process.env.PROMPT}`);
+}
+if (!Function('entry', `return (${process.env.EXPRESSION});`)(entry)) {
+  throw new Error(`assertion failed for ${process.env.PROMPT}: ${process.env.EXPRESSION}\n${JSON.stringify(entry, null, 2)}`);
+}
+NODE
+}
+
+strip_ansi() {
+  sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g'
+}
+
+clean_log() {
+  tr -d '\r' < "$1" | strip_ansi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if ! grep -F -q -- "$needle" <<< "$haystack"; then
+    printf 'missing expected text: %s\n' "$needle" >&2
+    exit 1
+  fi
+}
+
+run_tui() {
+  local keys="$1"
+  local log="$2"
+  local mutate_file="${3:-}"
+  local old_id="${4:-}"
+  local new_id="${5:-}"
+  if ! command -v script >/dev/null 2>&1; then
+    printf 'script command is required for TUI mutation tests\n' >&2
+    exit 1
+  fi
+  set +o pipefail
+  {
+    python3 - "$keys" <<'PY'
+import os
+import sys
+import time
+
+data = sys.argv[1].encode('utf-8').decode('unicode_escape')
+try:
+    for char in data:
+        os.write(1, char.encode('utf-8'))
+        time.sleep(0.08)
+except BrokenPipeError:
+    os._exit(0)
+os._exit(0)
+PY
+  } | script -q -e -O "$log" -c \
+    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$TEST_CODEX_HOME' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/codex-session-manager.js' --cwd '$PROJECT_CWD'" \
+    >/dev/null
+  local script_status="${PIPESTATUS[1]}"
+  set -o pipefail
+  if [[ "$script_status" -ne 0 ]]; then
+    printf 'TUI script run failed with exit %s\n' "$script_status" >&2
+    exit "$script_status"
+  fi
+}
+
+assert_fake_calls() {
+  local expected="$1"
+  local actual
+  actual="$(cat "$FAKE_CODEX_LOG")"
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'fake codex calls mismatch\nexpected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+    exit 1
+  fi
+  : > "$FAKE_CODEX_LOG"
+}
+
+assert_no_fake_calls() {
+  if [[ -s "$FAKE_CODEX_LOG" ]]; then
+    printf 'expected no fake codex calls, got:\n%s\n' "$(cat "$FAKE_CODEX_LOG")" >&2
+    exit 1
+  fi
+}
+
+start_identity_mutation_during_confirmation() {
+  local file="$1"
+  local old_id="$2"
+  local new_id="$3"
+  (
+    sleep 3.2
+    sed "1s/$old_id/$new_id/" "$file" > "$file.next"
+    mv -- "$file.next" "$file"
+  ) &
+  MUTATOR_PID=$!
+}
+
+case_a_file="$(write_session sessions "$uuid_a" "$uuid_a" "2026-07-20T00:00:01" "case A later parent metadata")"
+append_parent_meta "$case_a_file" "$uuid_b" "2026-07-20T00:00:01"
+write_subagent_with_parent_meta "$uuid_c" "$uuid_d" "2026-07-20T00:00:02" "case B subagent parent metadata"
+write_session sessions "$uuid_e" "$uuid_f" "2026-07-20T00:00:03" "case C mismatched ids" >/dev/null
+write_no_filename_uuid "$uuid_g" "2026-07-20T00:00:04" "case D missing filename uuid"
+write_session_missing_payload_id "$uuid_h" "2026-07-20T00:00:05" "case E missing payload id"
+case_f_file="$(write_session sessions "$uuid_i" "$uuid_i" "2026-07-20T00:00:06" "case F malformed later line")"
+printf '{bad json\n' >> "$case_f_file"
+write_session sessions "${uuid_j^^}" "$uuid_j" "2026-07-20T00:00:07" "case K uppercase filename id" >/dev/null
+terminal_control_file="$(write_session_with_terminal_controls "$uuid_u" "2026-07-20T00:00:08")"
+write_non_rollout_filename "$uuid_aa" "2026-07-20T00:00:09" "case N non rollout filename"
+
+json_output="$(isolated_env "$SCRIPT_DIR/codex-session-manager.js" --cwd "$PROJECT_CWD" --list all --json)"
+assert_json_entry "$json_output" "case A later parent metadata" "entry.id === '$uuid_a' && entry.mutationSafe === true"
+assert_json_entry "$json_output" "case B subagent parent metadata" "entry.id === '$uuid_c' && entry.mutationSafe === true"
+assert_json_entry "$json_output" "case C mismatched ids" "entry.mutationSafe === false && /mismatch/i.test(entry.unsafeReason || '')"
+assert_json_entry "$json_output" "case D missing filename uuid" "entry.mutationSafe === false && /filename/i.test(entry.unsafeReason || '')"
+assert_json_entry "$json_output" "case E missing payload id" "entry.mutationSafe === false && /session_meta/i.test(entry.unsafeReason || '')"
+assert_json_entry "$json_output" "case F malformed later line" "entry.id === '$uuid_i' && entry.mutationSafe === true"
+assert_json_entry "$json_output" "case K uppercase filename id" "entry.id === '$uuid_j' && entry.mutationSafe === true"
+assert_json_entry "$json_output" "case L terminal spoof" "entry.summary === 'case L terminal spoof' && !/[\\u0000-\\u001f\\u007f-\\u009f]/.test(entry.summary)"
+assert_json_entry "$json_output" "case N non rollout filename" "entry.mutationSafe === false && /filename/i.test(entry.unsafeReason || '')"
+
+list_output="$(isolated_env "$SCRIPT_DIR/codex-session-manager.js" --cwd "$PROJECT_CWD" --list all)"
+assert_contains "$list_output" "unsafe:"
+if LC_ALL=C grep -q "$(printf '\033')" <<< "$list_output"; then
+  printf 'plain list output contains a terminal escape from transcript data\n' >&2
+  exit 1
+fi
+
+if ! command -v script >/dev/null 2>&1; then
+  printf 'script command is required; refusing to skip TUI mutation safety tests\n' >&2
+  exit 1
+fi
+
+archive_file="$(write_session sessions "$uuid_l" "$uuid_l" "2026-07-20T00:01:01" "case G archive target")"
+delete_file="$(write_session sessions "$uuid_m" "$uuid_m" "2026-07-20T00:01:02" "case G delete target")"
+unarchive_file="$(write_session archived_sessions "$uuid_n" "$uuid_n" "2026-07-20T00:01:03" "case G unarchive target")"
+multi_one_file="$(write_session sessions "$uuid_o" "$uuid_o" "2026-07-20T00:01:04" "case H multi one")"
+multi_two_file="$(write_session sessions "$uuid_p" "$uuid_p" "2026-07-20T00:01:05" "case H multi two")"
+safe_multi_file="$(write_session sessions "$uuid_t" "$uuid_t" "2026-07-20T00:01:06" "case I active safe")"
+unsafe_multi_file="$(write_session sessions "$uuid_q" "$uuid_r" "2026-07-20T00:01:06" "case I active unsafe")"
+cancel_file="$(write_session sessions "$uuid_s" "$uuid_s" "2026-07-20T00:01:07" "case J cancel target")"
+unsafe_archived_file="$(write_session archived_sessions "$uuid_v" "$uuid_w" "2026-07-20T00:01:08" "case I archived unsafe")"
+safe_archived_file="$(write_session archived_sessions "$uuid_x" "$uuid_x" "2026-07-20T00:01:09" "case I archived safe")"
+toctou_file="$(write_session sessions "$uuid_y" "$uuid_y" "2026-07-20T00:01:10" "case M changed after confirmation")"
+multi_archive_one_file="$(write_session sessions "$uuid_ab" "$uuid_ab" "2026-07-20T00:02:01" "case O multi archive one")"
+multi_archive_two_file="$(write_session sessions "$uuid_ac" "$uuid_ac" "2026-07-20T00:02:02" "case O multi archive two")"
+multi_unarchive_one_file="$(write_session archived_sessions "$uuid_ad" "$uuid_ad" "2026-07-20T00:02:03" "case P multi unarchive one")"
+multi_unarchive_two_file="$(write_session archived_sessions "$uuid_ae" "$uuid_ae" "2026-07-20T00:02:04" "case P multi unarchive two")"
+batch_second_file="$(write_session sessions "$uuid_ag" "$uuid_ag" "2026-07-20T00:02:05" "case Q batch recheck second")"
+batch_first_file="$(write_session sessions "$uuid_af" "$uuid_af" "2026-07-20T00:02:06" "case Q batch recheck first")"
+
+run_tui "/case G archive target\nbq" "$TMP_DIR/archive.log"
+assert_fake_calls "archive $uuid_l"
+assert_contains "$(clean_log "$TMP_DIR/archive.log")" "$uuid_l"
+
+run_tui "/case G delete target\ndDELETE $uuid_m\nq" "$TMP_DIR/delete.log"
+assert_fake_calls "delete $uuid_m --force"
+assert_contains "$(clean_log "$TMP_DIR/delete.log")" "Required input: DELETE $uuid_m"
+
+run_tui "\t/case G unarchive target\nuq" "$TMP_DIR/unarchive.log"
+assert_fake_calls "unarchive $uuid_n"
+assert_contains "$(clean_log "$TMP_DIR/unarchive.log")" "$uuid_n"
+
+run_tui "/case H multi\nAdDELETE $uuid_p $uuid_o\nq" "$TMP_DIR/multi-delete.log"
+assert_fake_calls $'delete '"$uuid_p"$' --force\ndelete '"$uuid_o"$' --force'
+assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_p"
+assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_o"
+
+run_tui "/case O multi archive\nAbq" "$TMP_DIR/multi-archive.log"
+assert_fake_calls $'archive '"$uuid_ac"$'\narchive '"$uuid_ab"
+assert_contains "$(clean_log "$TMP_DIR/multi-archive.log")" "$uuid_ac"
+assert_contains "$(clean_log "$TMP_DIR/multi-archive.log")" "$uuid_ab"
+
+run_tui "\t/case P multi unarchive\nAuq" "$TMP_DIR/multi-unarchive.log"
+assert_fake_calls $'unarchive '"$uuid_ae"$'\nunarchive '"$uuid_ad"
+assert_contains "$(clean_log "$TMP_DIR/multi-unarchive.log")" "$uuid_ae"
+assert_contains "$(clean_log "$TMP_DIR/multi-unarchive.log")" "$uuid_ad"
+
+run_tui "/case C mismatched ids\nb\nq" "$TMP_DIR/unsafe-single-archive.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-single-archive.log")" "Blocked archive"
+
+run_tui "/case C mismatched ids\nd\nq" "$TMP_DIR/unsafe-single-delete.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-single-delete.log")" "Blocked delete"
+
+run_tui "/case D missing filename uuid\nb\nq" "$TMP_DIR/unsafe-missing-filename.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-missing-filename.log")" "filename UUID is missing or invalid"
+
+run_tui "/case E missing payload id\nd\nq" "$TMP_DIR/unsafe-missing-meta-id.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-missing-meta-id.log")" "first session_meta payload.id is missing"
+
+run_tui "/case N non rollout filename\nb\nq" "$TMP_DIR/unsafe-non-rollout.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-non-rollout.log")" "filename UUID is missing or invalid"
+
+run_tui "\t/case I archived unsafe\nu\nq" "$TMP_DIR/unsafe-single-unarchive.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-single-unarchive.log")" "Blocked unarchive"
+
+run_tui "/case I active\nAb\nq" "$TMP_DIR/unsafe-multi-archive.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-archive.log")" "Blocked archive"
+
+run_tui "/case I active\nAd\nq" "$TMP_DIR/unsafe-multi-delete.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-delete.log")" "Blocked delete"
+
+run_tui "\t/case I archived\nAu\nq" "$TMP_DIR/unsafe-multi-unarchive.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/unsafe-multi-unarchive.log")" "Blocked unarchive"
+
+run_tui "/case J cancel target\ndWRONG\nq" "$TMP_DIR/cancel-delete.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/cancel-delete.log")" "Delete cancelled"
+
+run_tui "/case L terminal spoof\ndDELETE $uuid_u\nq" "$TMP_DIR/terminal-controls.log"
+assert_fake_calls "delete $uuid_u --force"
+if LC_ALL=C grep -q "$(printf '\033')\[2J" "$TMP_DIR/terminal-controls.log"; then
+  printf 'transcript-provided terminal clear sequence reached TUI output\n' >&2
+  exit 1
+fi
+
+start_identity_mutation_during_confirmation "$toctou_file" "$uuid_y" "$uuid_z"
+run_tui "/case M changed after confirmation\ndDELETE $uuid_y\n\nq" "$TMP_DIR/toctou.log"
+wait "$MUTATOR_PID"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/toctou.log")" "Required input: DELETE $uuid_y"
+assert_contains "$(clean_log "$TMP_DIR/toctou.log")" "Blocked delete"
+
+run_tui "/case Q batch recheck\nAbq" "$TMP_DIR/batch-recheck.log" "$batch_second_file" "$uuid_ag" "$uuid_ah"
+assert_fake_calls "archive $uuid_af"
+assert_contains "$(clean_log "$TMP_DIR/batch-recheck.log")" "Blocked archive"
+
+printf '%s\n' "$archive_file" "$delete_file" "$unarchive_file" "$multi_one_file" "$multi_two_file" \
+  "$safe_multi_file" "$unsafe_multi_file" "$cancel_file" "$unsafe_archived_file" "$safe_archived_file" \
+  "$terminal_control_file" "$toctou_file" "$multi_archive_one_file" "$multi_archive_two_file" \
+  "$multi_unarchive_one_file" "$multi_unarchive_two_file" "$batch_first_file" "$batch_second_file" >/dev/null
+
+assert_no_fake_calls
 printf 'smoke ok\n'
