@@ -95,6 +95,7 @@ OMX는 평소 방식대로 설치하고 사용합니다.
 omx uninstall --dry-run
 omx uninstall
 ./omx-guard.sh remove --no-snapshot
+./omx-guard.sh status
 ```
 
 각 명령의 역할은 다음과 같습니다.
@@ -103,8 +104,11 @@ omx uninstall
 - `omx uninstall --dry-run`: 네이티브 제거 계획이 외부 훅과 충돌하지 않는지 확인
 - `omx uninstall`: OMX가 관리하는 hooks, prompts, skills, agents 및 `AGENTS.md` 정리
 - `remove --no-snapshot`: 이미 명명된 스냅샷이 있으므로 추가 스냅샷 없이 npm 패키지, 실행 파일, 명백한 설정, 상태 및 캐시 정리
+- `status`: `omx` 실행 파일이 제거된 뒤 Guard로 남은 OMX 흔적과 스냅샷 상태 확인
 
-`--no-snapshot`을 생략하면 `remove`가 `pre-remove` 스냅샷을 하나 더 생성합니다. `omx uninstall`을 건너뛰고 `remove`만 실행하면 OMX가 설치한 hooks, prompts, skills, agents 또는 `AGENTS.md`가 남을 수 있으므로 완전 제거 절차로 사용하지 않습니다.
+`omx uninstall --dry-run`이 실패하면 실제 `omx uninstall`과 Guard `remove`를 진행하지 않습니다. `--no-snapshot`을 생략하면 `remove`가 `pre-remove` 스냅샷을 하나 더 생성합니다. `omx uninstall`을 건너뛰고 `remove`만 실행하면 OMX가 설치한 hooks, prompts, skills, agents 또는 `AGENTS.md`가 남을 수 있으므로 완전 제거 절차로 사용하지 않습니다.
+
+다른 PC에서 제거할 때는 해당 PC에서 위 순서대로 새 스냅샷을 생성합니다. 다른 PC에서 가져온 스냅샷을 제거 전 복구 지점으로 재사용하지 않습니다. Guard restore는 스냅샷에 기록된 `HOME` 및 `CODEX_HOME`과 현재 경로가 다르면 중단됩니다.
 
 프로젝트의 `.omx`도 명시적으로 제거하려면:
 
@@ -245,13 +249,15 @@ OMX 훅과 Orca 같은 외부 도구의 훅이 같은 `hooks.json` 배열에 있
 - 스냅샷의 `HOME` 및 `CODEX_HOME`과 현재 환경이 같은지 확인
 - 복구 후 `config.toml` 문법 검사
 
-OMX가 설치된 상태에서 만든 스냅샷을 복구하는 경우 당시 발견한 패키지와 실행 파일의 정확한 경로를 보존하지만, 패키지 내용이나 버전을 자동으로 되돌리지는 않습니다. 제거 전 스냅샷으로 돌아가려면 manifest의 `omx.installed_version`을 확인하고 원래 사용한 패키지 관리자로 해당 버전을 먼저 설치한 뒤 restore를 실행합니다.
+OMX가 설치된 상태에서 만든 스냅샷을 복구하는 경우 당시 발견한 패키지와 실행 파일의 정확한 경로를 보존하지만, 패키지 내용이나 버전을 자동으로 되돌리지는 않습니다. 제거 전 스냅샷으로 돌아가려면 manifest의 `omx.installed_version`을 확인하고 원래 사용한 패키지 관리자로 해당 버전을 먼저 설치한 뒤 restore를 실행합니다. `list`로 스냅샷 ID를 찾은 다음 `${OMX_GUARD_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/omx-guard}/snapshots/<스냅샷-ID>/manifest.json`에서 해당 필드를 확인할 수 있습니다.
 
 ```bash
-npm install -g oh-my-codex@0.20.2  # 예: manifest에 0.20.2가 기록된 경우
+npm install -g oh-my-codex@<스냅샷에 기록된 버전>
 ./omx-guard.sh restore before-omx-uninstall
 omx doctor
 ```
+
+`<스냅샷에 기록된 버전>` 전체를 실제 `omx.installed_version` 값으로 바꿔서 실행합니다. 예를 들어 manifest 값이 `0.20.2`라면 `npm install -g oh-my-codex@0.20.2`를 사용합니다. 스냅샷은 생성 당시와 같은 `HOME` 및 `CODEX_HOME`에서 복구해야 하며, PC 간 설정 이전 용도로 사용하지 않습니다.
 
 정확한 설치 경로 기록이 없는 2.1.0 이하 스냅샷은 데이터 손실을 피하기 위해 npm 패키지 및 실행 파일 제거를 건너뜁니다. 가장 단순하고 정확한 용도는 OMX 설치 전에 만든 스냅샷으로 복구하는 것입니다.
 

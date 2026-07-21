@@ -64,6 +64,8 @@
 5. Guard는 알려진 OMX 패키지, 실행 파일, 명백한 설정, 상태 및 캐시를 제거한다.
 6. 사용자가 Guard `status`로 최종 상태를 확인한다. 전역 패키지와 `omx` 실행 파일이 제거된 뒤에는 `omx doctor`를 실행할 수 없다.
 
+다른 PC에서 제거할 때는 해당 PC에서 새 스냅샷을 생성해야 한다. 다른 PC에서 가져온 스냅샷을 제거 전 복구 지점으로 재사용하지 않는다.
+
 ### 시나리오 B: OMX 설치 전 환경 보존
 
 1. 사용자가 OMX 설치 전에 `snapshot pre-omx`를 실행한다.
@@ -79,7 +81,15 @@
 5. 설치 전에 존재했던 설정 파일과 디렉터리를 복원한다.
 6. TOML 문법과 최종 상태를 확인한다.
 
-OMX가 설치된 상태에서 만든 스냅샷으로 복구하려면 사용자가 manifest의 `omx.installed_version`을 확인하고 원래 패키지 관리자로 해당 버전을 먼저 재설치해야 한다. Guard는 npm 패키지 내용을 스냅샷하거나 자동 재설치하지 않는다.
+OMX가 설치된 상태에서 만든 스냅샷으로 복구하려면 사용자가 manifest의 `omx.installed_version`을 확인하고 원래 패키지 관리자로 해당 버전을 먼저 재설치해야 한다. Guard는 npm 패키지 내용을 스냅샷하거나 자동 재설치하지 않는다. 문서는 다음 복구 순서를 명시해야 한다.
+
+```bash
+npm install -g oh-my-codex@<스냅샷에 기록된 버전>
+./omx-guard.sh restore before-omx-uninstall
+omx doctor
+```
+
+플레이스홀더는 실제 `omx.installed_version` 값으로 교체해야 하며, 스냅샷은 생성 당시와 같은 `HOME` 및 `CODEX_HOME`에서만 복구할 수 있다.
 
 ### 시나리오 D: 프로젝트별 OMX 상태 관리
 
@@ -277,8 +287,10 @@ manifest 주요 필드:
 - `remove`는 legacy agent 옵션을 자동 삭제하지 않는다.
 - 문서는 `remove` 단독 실행을 완전 제거로 설명하지 않는다.
 - 문서는 `snapshot` → `omx uninstall --dry-run` → `omx uninstall` → `remove --no-snapshot` 순서를 제공한다.
+- 문서는 제거 후 `omx doctor` 대신 Guard `status`로 최종 상태를 확인하도록 안내한다.
 - 외부 훅 좌표 오류 발생 시 snapshot이 검사를 우회하지 않으며 제3자 훅 소유권을 먼저 확인하도록 안내한다.
 - OMX 설치 스냅샷 복구 시 기록된 버전의 패키지를 먼저 재설치하도록 안내한다.
+- 문서는 다른 PC에서 제거할 경우 해당 PC에서 새 스냅샷을 생성하고, restore에는 동일한 `HOME` 및 `CODEX_HOME`이 필요하다고 안내한다.
 - 서로 다른 `HOME`으로 복구를 시도하면 중단된다.
 - 스냅샷 루트 밖 경로나 변조된 manifest의 허용되지 않은 복구 경로는 거부된다.
 - 스냅샷 루트 바깥 경로는 `delete-snapshot`으로 삭제할 수 없다.

@@ -28,8 +28,8 @@ OMX Guard — macOS/Linux용 OMX 백업·제거·복구 도구
   omx-guard.sh status
   omx-guard.sh snapshot [이름] [--project /path]...
   omx-guard.sh list
-  omx-guard.sh remove [--purge-project-state] [--project /path]...
-  omx-guard.sh restore <스냅샷-ID|latest>
+  omx-guard.sh remove [--no-snapshot] [--purge-project-state] [--project /path]...
+  omx-guard.sh restore <스냅샷-ID|label|latest>
   omx-guard.sh delete-snapshot <스냅샷-ID>
   omx-guard.sh help
 
@@ -41,7 +41,16 @@ OMX Guard — macOS/Linux용 OMX 백업·제거·복구 도구
   ./omx-guard.sh restore pre-omx
 
   # 현재 OMX를 완전히 제거
-  ./omx-guard.sh remove
+  ./omx-guard.sh snapshot before-omx-uninstall
+  omx uninstall --dry-run
+  omx uninstall
+  ./omx-guard.sh remove --no-snapshot
+  ./omx-guard.sh status
+
+  # 제거 전 스냅샷으로 복구
+  npm install -g oh-my-codex@<스냅샷에 기록된 버전>
+  ./omx-guard.sh restore before-omx-uninstall
+  omx doctor
 
 프로젝트별 .omx/.codex까지 백업하려면:
   ./omx-guard.sh snapshot pre-omx --project ~/work/project-a
@@ -49,6 +58,10 @@ OMX Guard — macOS/Linux용 OMX 백업·제거·복구 도구
 remove는 기본적으로 프로젝트의 .omx는 삭제하지 않습니다.
 프로젝트 상태도 지우려면:
   ./omx-guard.sh remove --purge-project-state --project ~/work/project-a
+
+omx uninstall --dry-run이 실패하면 실제 uninstall과 Guard remove를 진행하지 마세요.
+복구 명령의 버전 자리에는 snapshot manifest의 omx.installed_version 값을 사용하세요.
+스냅샷은 생성 당시와 같은 HOME 및 CODEX_HOME에서만 복구할 수 있습니다.
 EOF
 }
 
