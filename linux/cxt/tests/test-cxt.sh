@@ -12,6 +12,10 @@ LEGACY_CX="${CXT_DIR%/*}/cx/bin/cx"
 ORIGINAL_PATH="$PATH"
 ZSH_BIN="$(command -v zsh || true)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cxt-test.XXXXXX")"
+DEFAULT_CODEX_ARGS=(
+  --no-alt-screen
+  -c 'tui.keymap.global.open_transcript="ctrl-t"'
+)
 
 cleanup() {
   rm -rf "$TMP_ROOT"
@@ -106,6 +110,10 @@ for mock_arg in "$@"; do
   printf '%s\0' "$mock_arg" >> "$CXT_TMUX_LOG.$call_number"
 done
 
+if [ "${CXT_TMUX_FAIL_CALL:-}" = "$call_number" ]; then
+  exit 1
+fi
+
 case "${1:-}" in
   list-sessions)
     if [ -r "${CXT_TMUX_SESSIONS:-}" ]; then
@@ -185,54 +193,57 @@ assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + untrusted ap
 assert_file_contains "$TMP_ROOT/cxt-help" '--attach, --at [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-session, --ks [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-all, --ka'
+assert_file_contains "$TMP_ROOT/cxt-help" 'Ctrl+T        Open the current Codex transcript'
+assert_file_contains "$TMP_ROOT/cxt-help" 'Without tmux, Codex still launches directly with transcript access enabled.'
+assert_file_contains "$TMP_ROOT/cxt-help" 'With tmux, new cxt windows keep up to 50000 lines of scrollback.'
 
 run_direct_case empty
-assert_args "$DIRECT_LOG" --no-alt-screen
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}"
 
 for effort in low medium high xhigh max ultra; do
   run_direct_case "reasoning-$effort" "--$effort"
-  assert_args "$DIRECT_LOG" --no-alt-screen -c "model_reasoning_effort=\"$effort\""
+  assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c "model_reasoning_effort=\"$effort\""
 done
 
 run_direct_case model-sol --sol
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-sol
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol
 
 run_direct_case model-terra --terra
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-terra
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-terra
 
 run_direct_case model-luna --luna
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-luna
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-luna
 
 run_direct_case model-gpt55 --gpt55
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.5
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.5
 
 run_direct_case model-gpt54 --gpt54
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.4
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4
 
 run_direct_case model-mini --mini
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.4-mini
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4-mini
 
 run_direct_case model-spark --spark
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.3-codex-spark
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.3-codex-spark
 
 run_direct_case permission-safe --safe
-assert_args "$DIRECT_LOG" --no-alt-screen --sandbox read-only --ask-for-approval untrusted
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox read-only --ask-for-approval untrusted
 
 run_direct_case permission-auto --auto
-assert_args "$DIRECT_LOG" --no-alt-screen --sandbox workspace-write --ask-for-approval on-request
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox workspace-write --ask-for-approval on-request
 
 run_direct_case permission-full-auto --full-auto
-assert_args "$DIRECT_LOG" --no-alt-screen --sandbox workspace-write --ask-for-approval never
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox workspace-write --ask-for-approval never
 
 run_direct_case madmax --madmax
-assert_args "$DIRECT_LOG" --no-alt-screen --yolo
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --yolo
 
 run_direct_case combined --xhigh --madmax
-assert_args "$DIRECT_LOG" --no-alt-screen -c 'model_reasoning_effort="xhigh"' --yolo
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' --yolo
 
 run_direct_case all-shortcuts --sol --high --auto 'prompt with spaces'
 assert_args "$DIRECT_LOG" \
-  --no-alt-screen \
+  "${DEFAULT_CODEX_ARGS[@]}" \
   --model gpt-5.6-sol \
   -c 'model_reasoning_effort="high"' \
   --sandbox workspace-write \
@@ -240,19 +251,24 @@ assert_args "$DIRECT_LOG" \
   'prompt with spaces'
 
 run_direct_case prompt --xhigh '현재 프로젝트의 테스트를 수정해줘'
-assert_args "$DIRECT_LOG" --no-alt-screen -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
 
 run_direct_case passthrough -- --sol --high --auto --madmax --at --ks --ka
-assert_args "$DIRECT_LOG" --no-alt-screen -- --sol --high --auto --madmax --at --ks --ka
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --sol --high --auto --madmax --at --ks --ka
 
 run_direct_case native --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
-assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
+
+run_direct_case transcript-override -c 'tui.keymap.global.open_transcript="alt-t"'
+assert_args "$DIRECT_LOG" \
+  "${DEFAULT_CODEX_ARGS[@]}" \
+  -c 'tui.keymap.global.open_transcript="alt-t"'
 
 run_direct_case subcommand resume --last
-assert_args "$DIRECT_LOG" --no-alt-screen resume --last
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" resume --last
 
 run_direct_case review review
-assert_args "$DIRECT_LOG" --no-alt-screen review
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" review
 
 assert_shortcut_conflict model --sol --terra
 assert_shortcut_conflict reasoning --low --high
@@ -267,7 +283,7 @@ if [ -n "$ZSH_BIN" ]; then
   CXT_PATH="$CXT" MOCK_PATH="$zsh_case/bin" CXT_CODEX_LOG="$zsh_case/codex.args" \
     "$ZSH_BIN" -c 'cd "$1" && PATH="$MOCK_PATH" "$CXT_PATH" --madmax' zsh "$zsh_case/project" \
     2> "$zsh_case/stderr"
-  assert_args "$zsh_case/codex.args" --no-alt-screen --yolo
+  assert_args "$zsh_case/codex.args" "${DEFAULT_CODEX_ARGS[@]}" --yolo
 fi
 
 missing_root="$TMP_ROOT/missing-codex"
@@ -538,10 +554,11 @@ make_tmux_mock "$tmux_root/bin"
 )
 assert_args "$tmux_root/tmux.args.1" \
   new-session -d -s codex-Project-name-demo-000000 -c "$tmux_project" \
-  codex --no-alt-screen -c 'model_reasoning_effort="xhigh"' 'prompt with spaces'
+  codex "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' 'prompt with spaces'
 assert_args "$tmux_root/tmux.args.2" set-option -t codex-Project-name-demo-000000 mouse on
-assert_args "$tmux_root/tmux.args.3" set-option -w -t codex-Project-name-demo-000000 remain-on-exit off
-assert_args "$tmux_root/tmux.args.4" attach-session -t codex-Project-name-demo-000000
+assert_args "$tmux_root/tmux.args.3" set-option -w -t codex-Project-name-demo-000000 history-limit 50000
+assert_args "$tmux_root/tmux.args.4" set-option -w -t codex-Project-name-demo-000000 remain-on-exit off
+assert_args "$tmux_root/tmux.args.5" attach-session -t codex-Project-name-demo-000000
 
 rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
 (
@@ -552,7 +569,27 @@ rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
     CXT_TMUX_LOG="$tmux_root/tmux.args" \
     "$CXT" review
 )
-assert_args "$tmux_root/tmux.args.4" switch-client -t codex-Project-name-demo-000000
+assert_args "$tmux_root/tmux.args.5" switch-client -t codex-Project-name-demo-000000
+
+rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
+set +e
+(
+  unset TMUX
+  cd "$tmux_project"
+  PATH="$tmux_root/bin" \
+    CXT_TMUX_COUNT="$tmux_root/tmux.count" \
+    CXT_TMUX_LOG="$tmux_root/tmux.args" \
+    CXT_TMUX_FAIL_CALL=3 \
+    "$CXT"
+) 2> "$tmux_root/history-limit-failure.stderr"
+history_limit_status=$?
+set -e
+[ "$history_limit_status" -eq 1 ] || \
+  fail "history-limit failure returned $history_limit_status instead of 1"
+assert_args "$tmux_root/tmux.args.3" \
+  set-option -w -t codex-Project-name-demo-000000 history-limit 50000
+assert_args "$tmux_root/tmux.args.4" kill-session -t codex-Project-name-demo-000000
+[ ! -e "$tmux_root/tmux.args.5" ] || fail 'history-limit failure attached to the cxt session'
 
 # Installer tests always use temporary homes.
 install_home="$TMP_ROOT/install-home"

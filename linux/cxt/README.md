@@ -44,12 +44,21 @@ cxt --ks
 ```
 
 - 모든 실행에는 `--no-alt-screen`이 기본으로 추가됩니다.
+- `Ctrl+T`를 누르면 현재 세션의 transcript를 열 수 있습니다. transcript 화면에서는 방향키, `PageUp`/`PageDown`, `Home`/`End`로 이전 대화를 탐색하고 `q`로 돌아옵니다.
 - Codex 네이티브 옵션과 서브커맨드는 그대로 전달됩니다.
 - `--` 뒤의 값은 cxt 편의 옵션으로 변환하지 않습니다.
-- tmux가 없으면 현재 터미널에서 Codex를 직접 실행합니다.
+- tmux가 없으면 현재 터미널에서 Codex를 직접 실행하며 transcript 기능은 그대로 사용할 수 있습니다.
 - tmux 안에서는 nested attach 대신 새 세션으로 client를 전환합니다.
 
 세션 이름은 `codex-<현재 디렉터리>-<HHMMSS>` 형식이며 영문자, 숫자, `_`, `-` 이외의 문자는 `-`로 바뀝니다.
+
+`Ctrl+T` transcript는 Codex의 네이티브 `tui.keymap.global.open_transcript` 설정을 cxt 실행에만 적용합니다. 사용자 전역 `~/.codex/config.toml`은 수정하지 않으며, 다른 키를 원하면 뒤에 네이티브 설정을 전달해 덮어쓸 수 있습니다. `Esc`는 Codex가 응답 중단과 이전 메시지 backtrack에 예약하므로 transcript 키로 지정할 수 없습니다.
+
+```bash
+cxt -c 'tui.keymap.global.open_transcript="alt-t"'
+```
+
+tmux로 시작한 새 cxt 창은 터미널 출력도 더 오래 볼 수 있도록 window 단위 `history-limit`을 50,000줄로 설정합니다. 사용자 전역 tmux 설정은 변경하지 않습니다. tmux가 없는 환경에서는 터미널 자체의 스크롤백 한도를 따르지만, `Ctrl+T` transcript는 저장된 Codex 대화를 별도로 보여줍니다.
 
 ## tmux 세션 관리
 

@@ -76,6 +76,8 @@
    - `bin/cxt`의 모델 별칭이 현재 list-visible 모델 slug를 정확히 가리키는가
    - 각 reasoning 별칭이 현재 모델들이 지원하는 값인가
    - `--sandbox`와 `--ask-for-approval` 값이 현재 CLI 도움말과 일치하는가
+   - Codex가 `tui.keymap.global.open_transcript`와 `ctrl-t`를 계속 허용하고 transcript pager를 여는가
+   - tmux가 없는 직접 실행에도 transcript 바인딩이 적용되고, tmux history-limit은 cxt window에만 적용되는가
    - deprecated 또는 새 위험 옵션이 권한 프리셋 의미를 바꾸지 않았는가
    - 모든 새 Codex 네이티브 옵션이 여전히 변환 없이 전달되는가
    - `--` 뒤의 값과 공백이 포함된 인자의 boundary가 보존되는가

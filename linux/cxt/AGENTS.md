@@ -20,6 +20,7 @@ This file applies only to `linux/cxt/`.
 - Whenever completion behavior changes, update `completions/cxt.bash`, `completions/cxt.zsh`, `install-cxt.sh`, `README.md`, and `tests/test-cxt.sh` together.
 - Keep `bin/cxt` and `install-cxt.sh` compatible with Bash 3.2 where practical. Do not introduce associative arrays or unsafe empty-array expansion under nounset.
 - Do not add npm or Node.js as a runtime dependency. A maintenance-only documentation helper may use Node when it is already provided by Codex.
+- Keep transcript access independent of tmux: the Codex `open_transcript` binding must also be applied when cxt falls back to direct execution. Any enlarged tmux history must be scoped to the new cxt window, never the user's global tmux server configuration.
 - Do not replace the absolute symlink installation model or edit a user's real shell rc files during tests.
 - Preserve the safe `cx` to `cxt` migration: remove only the exact legacy link managed by this repo and its exact marker block; never overwrite or remove a user-owned `cx` path.
 - Do not guess unreleased, hidden, or account-inaccessible model slugs. A cached model is eligible for a convenience alias only when its current catalog entry is user-visible and the alias provides durable value.

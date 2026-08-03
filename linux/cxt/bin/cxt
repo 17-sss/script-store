@@ -3,6 +3,8 @@
 # Run Codex in a project-specific tmux session and manage cxt sessions.
 
 CXT_SESSION_PREFIX='codex-'
+CXT_TMUX_HISTORY_LIMIT='50000'
+CXT_TRANSCRIPT_CONFIG='tui.keymap.global.open_transcript="ctrl-t"'
 
 print_cxt_help() {
   cat <<'EOF'
@@ -33,10 +35,13 @@ cxt shortcuts:
     --kill-all, --ka               Kill all cxt sessions
 
   Other:
+    Ctrl+T        Open the current Codex transcript
     --cxt-help    Show this help
-    --           Stop interpreting cxt shortcuts
+    --            Stop interpreting cxt shortcuts
 
 All other options are passed to Codex unchanged.
+Without tmux, Codex still launches directly with transcript access enabled.
+With tmux, new cxt windows keep up to 50000 lines of scrollback.
 EOF
 }
 
@@ -276,7 +281,10 @@ add_permission_shortcut() {
   esac
 }
 
-codex_args=(--no-alt-screen)
+codex_args=(
+  --no-alt-screen
+  -c "$CXT_TRANSCRIPT_CONFIG"
+)
 passthrough=0
 model_shortcut=
 reasoning_shortcut=
@@ -420,6 +428,11 @@ then
 fi
 
 if ! tmux set-option -t "$session" mouse on; then
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+if ! tmux set-option -w -t "$session" history-limit "$CXT_TMUX_HISTORY_LIMIT"; then
   tmux kill-session -t "$session" >/dev/null 2>&1 || true
   exit 1
 fi
