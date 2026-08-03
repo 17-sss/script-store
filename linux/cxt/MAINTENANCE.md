@@ -80,7 +80,7 @@
    - 모든 새 Codex 네이티브 옵션이 여전히 변환 없이 전달되는가
    - `--` 뒤의 값과 공백이 포함된 인자의 boundary가 보존되는가
 
-6. drift가 있을 때만 `bin/cxt`, `--cxt-help`, `README.md`, `tests/test-cxt.sh`를 함께 수정합니다. 이 문서의 마지막 검토 기준도 갱신합니다.
+6. drift가 있을 때만 `bin/cxt`, `--cxt-help`, `completions/cxt.bash`, `completions/cxt.zsh`, `README.md`, `tests/test-cxt.sh`를 함께 수정합니다. 이 문서의 마지막 검토 기준도 갱신합니다.
 
 7. 검증합니다.
 
@@ -88,6 +88,8 @@
    cd linux/cxt
    bash -n bin/cxt
    bash -n install-cxt.sh
+   bash -n completions/cxt.bash
+   zsh -n completions/cxt.zsh
    bash -n tests/test-cxt.sh
    ./tests/test-cxt.sh
    git diff --check
@@ -109,9 +111,9 @@
 - safe/auto/full-auto/madmax 권한 프리셋의 sandbox 및 approval 의미
 - 네이티브 옵션 passthrough와 -- 이후 무변환 계약
 
-drift가 확인된 경우에만 linux/cxt/bin/cxt, --cxt-help, README.md, tests/test-cxt.sh, MAINTENANCE.md의 마지막 검토 기준을 함께 갱신한다. 추측한 모델이나 숨겨진 모델을 추가하지 않는다. npm/Node 런타임 의존성을 추가하지 않는다. 실제 사용자 홈이나 shell rc를 수정하지 않는다.
+drift가 확인된 경우에만 linux/cxt/bin/cxt, --cxt-help, completions/cxt.bash, completions/cxt.zsh, README.md, tests/test-cxt.sh, MAINTENANCE.md의 마지막 검토 기준을 함께 갱신한다. 추측한 모델이나 숨겨진 모델을 추가하지 않는다. npm/Node 런타임 의존성을 추가하지 않는다. 실제 사용자 홈이나 shell rc를 수정하지 않는다.
 
-bash 구문 검사, 전체 격리 테스트, 설치되어 있다면 ShellCheck, git diff --check를 실행한다. 변경이 없으면 근거와 함께 no-op으로 보고한다. 변경이 있으면 파일별 변경, 검증 결과, 남은 모델별 제약을 보고한다. 커밋하거나 푸시하지 않는다.
+Bash/Zsh completion을 포함한 구문 검사, 전체 격리 테스트, 설치되어 있다면 ShellCheck, git diff --check를 실행한다. 변경이 없으면 근거와 함께 no-op으로 보고한다. 변경이 있으면 파일별 변경, 검증 결과, 남은 모델별 제약을 보고한다. 커밋하거나 푸시하지 않는다.
 ```
 
 AGENTS 지침 자체는 예약 실행을 만들지 않습니다. 자동 주기 실행이 필요하면 Codex app의 Scheduled task에 위 프롬프트와 이 저장소를 연결해야 합니다.

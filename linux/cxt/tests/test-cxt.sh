@@ -6,8 +6,11 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 CXT_DIR="${SCRIPT_DIR%/tests}"
 CXT="$CXT_DIR/bin/cxt"
 INSTALLER="$CXT_DIR/install-cxt.sh"
+ZSH_COMPLETION="$CXT_DIR/completions/cxt.zsh"
+BASH_COMPLETION="$CXT_DIR/completions/cxt.bash"
 LEGACY_CX="${CXT_DIR%/*}/cx/bin/cx"
 ORIGINAL_PATH="$PATH"
+ZSH_BIN="$(command -v zsh || true)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cxt-test.XXXXXX")"
 
 cleanup() {
@@ -24,6 +27,12 @@ assert_file_contains() {
   local file="$1"
   local expected="$2"
   grep -Fq -- "$expected" "$file" || fail "$file does not contain: $expected"
+}
+
+assert_file_lacks_line() {
+  local file="$1"
+  local unexpected="$2"
+  ! grep -Fxq -- "$unexpected" "$file" || fail "$file contains unexpected line: $unexpected"
 }
 
 assert_count() {
@@ -157,10 +166,14 @@ assert_shortcut_conflict() {
 
 bash -n "$CXT"
 bash -n "$INSTALLER"
+bash -n "$BASH_COMPLETION"
 bash -n "$0"
+if [ -n "$ZSH_BIN" ]; then
+  "$ZSH_BIN" -n "$ZSH_COMPLETION"
+fi
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -s bash "$CXT" "$INSTALLER"
+  shellcheck -s bash "$CXT" "$INSTALLER" "$BASH_COMPLETION"
 else
   printf 'SKIP: ShellCheck is not installed\n'
 fi
@@ -246,13 +259,13 @@ assert_shortcut_conflict reasoning --low --high
 assert_shortcut_conflict permission --safe --auto
 
 # Calling the executable from zsh still dispatches through its Bash shebang.
-if command -v zsh >/dev/null 2>&1; then
+if [ -n "$ZSH_BIN" ]; then
   zsh_case="$TMP_ROOT/zsh-call"
   mkdir -p "$zsh_case/project"
   make_minimal_bin "$zsh_case/bin"
   make_codex_mock "$zsh_case/bin"
   CXT_PATH="$CXT" MOCK_PATH="$zsh_case/bin" CXT_CODEX_LOG="$zsh_case/codex.args" \
-    zsh -c 'cd "$1" && PATH="$MOCK_PATH" "$CXT_PATH" --madmax' zsh "$zsh_case/project" \
+    "$ZSH_BIN" -c 'cd "$1" && PATH="$MOCK_PATH" "$CXT_PATH" --madmax' zsh "$zsh_case/project" \
     2> "$zsh_case/stderr"
   assert_args "$zsh_case/codex.args" --no-alt-screen --yolo
 fi
@@ -429,6 +442,86 @@ set -e
 [ "$missing_tmux_status" -eq 127 ] || fail "missing tmux management returned $missing_tmux_status instead of 127"
 assert_file_contains "$missing_tmux_root/stderr" 'cxt: tmux command not found'
 
+# Completion tests use a mock tmux server and expose only valid cxt session
+# names. General tmux sessions and malformed codex-* names must stay hidden.
+completion_root="$TMP_ROOT/completion"
+make_minimal_bin "$completion_root/bin"
+make_tmux_mock "$completion_root/bin"
+printf '%s\n' \
+  work \
+  codex-alpha-100000 \
+  codex-project_two-120000 \
+  codex- \
+  codex-invalid.name > "$completion_root/sessions"
+
+PATH="$completion_root/bin" \
+  CXT_TMUX_COUNT="$completion_root/bash-tmux.count" \
+  CXT_TMUX_LOG="$completion_root/bash-tmux.args" \
+  CXT_TMUX_SESSIONS="$completion_root/sessions" \
+  BASH_COMPLETION="$BASH_COMPLETION" \
+  bash -c '
+    source "$BASH_COMPLETION"
+    COMP_WORDS=(cxt --at "")
+    COMP_CWORD=2
+    _cxt_complete
+    printf "%s\n" "${COMPREPLY[@]}"
+  ' > "$completion_root/bash-at.out"
+assert_file_contains "$completion_root/bash-at.out" 'codex-alpha-100000'
+assert_file_contains "$completion_root/bash-at.out" 'codex-project_two-120000'
+assert_file_lacks_line "$completion_root/bash-at.out" work
+assert_file_lacks_line "$completion_root/bash-at.out" codex-invalid.name
+assert_file_lacks_line "$completion_root/bash-at.out" codex-
+
+rm -f "$completion_root/bash-tmux.count" "$completion_root"/bash-tmux.args.*
+PATH="$completion_root/bin" \
+  CXT_TMUX_COUNT="$completion_root/bash-tmux.count" \
+  CXT_TMUX_LOG="$completion_root/bash-tmux.args" \
+  CXT_TMUX_SESSIONS="$completion_root/sessions" \
+  BASH_COMPLETION="$BASH_COMPLETION" \
+  bash -c '
+    source "$BASH_COMPLETION"
+    COMP_WORDS=(cxt --ks=codex-project)
+    COMP_CWORD=1
+    _cxt_complete
+    printf "%s\n" "${COMPREPLY[@]}"
+  ' > "$completion_root/bash-ks-equals.out"
+assert_file_contains "$completion_root/bash-ks-equals.out" '--ks=codex-project_two-120000'
+
+if [ -n "$ZSH_BIN" ]; then
+  PATH="$completion_root/bin" \
+    CXT_TMUX_COUNT="$completion_root/zsh-tmux.count" \
+    CXT_TMUX_LOG="$completion_root/zsh-tmux.args" \
+    CXT_TMUX_SESSIONS="$completion_root/sessions" \
+    ZSH_COMPLETION="$ZSH_COMPLETION" \
+    "$ZSH_BIN" -f -c 'source "$ZSH_COMPLETION"; _cxt_session_names' \
+      > "$completion_root/zsh-sessions.out"
+  assert_file_contains "$completion_root/zsh-sessions.out" 'codex-alpha-100000'
+  assert_file_contains "$completion_root/zsh-sessions.out" 'codex-project_two-120000'
+  assert_file_lacks_line "$completion_root/zsh-sessions.out" work
+  assert_file_lacks_line "$completion_root/zsh-sessions.out" codex-invalid.name
+  assert_file_lacks_line "$completion_root/zsh-sessions.out" codex-
+
+  rm -f "$completion_root/zsh-tmux.count" "$completion_root"/zsh-tmux.args.*
+  PATH="$completion_root/bin" \
+    CXT_TMUX_COUNT="$completion_root/zsh-tmux.count" \
+    CXT_TMUX_LOG="$completion_root/zsh-tmux.args" \
+    CXT_TMUX_SESSIONS="$completion_root/sessions" \
+    ZSH_COMPLETION="$ZSH_COMPLETION" \
+    "$ZSH_BIN" -f -c '
+      source "$ZSH_COMPLETION"
+      compadd() {
+        [[ "${1:-}" == -- ]] && shift
+        print -rl -- "$@"
+      }
+      words=(cxt --kill-session "")
+      CURRENT=3
+      _cxt
+    ' > "$completion_root/zsh-kill-session.out"
+  assert_file_contains "$completion_root/zsh-kill-session.out" 'codex-alpha-100000'
+  assert_file_contains "$completion_root/zsh-kill-session.out" 'codex-project_two-120000'
+  assert_file_lacks_line "$completion_root/zsh-kill-session.out" work
+fi
+
 tmux_root="$TMP_ROOT/tmux"
 tmux_project="$tmux_root/Project name+demo"
 mkdir -p "$tmux_project"
@@ -471,12 +564,21 @@ HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER"
 assert_file_contains "$install_home/.zshrc" '# Keep this ~/.local/bin note'
 assert_file_contains "$install_home/.zshrc" 'export EDITOR=vim'
 assert_count 1 '# >>> script-store cxt >>>' "$install_home/.zshrc"
+assert_count 1 '# >>> script-store cxt completion >>>' "$install_home/.zshrc"
+assert_file_contains "$install_home/.zshrc" "$ZSH_COMPLETION"
+if [ -n "$ZSH_BIN" ]; then
+  HOME="$install_home" ZDOTDIR="$install_home" PATH="$ORIGINAL_PATH" \
+    "$ZSH_BIN" -f -c 'source "$1"; [[ "${_comps[cxt]-}" = _cxt ]]' zsh "$install_home/.zshrc" || \
+    fail 'installed zsh completion did not register cxt'
+fi
 HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER"
 assert_count 1 '# >>> script-store cxt >>>' "$install_home/.zshrc"
+assert_count 1 '# >>> script-store cxt completion >>>' "$install_home/.zshrc"
 
 HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall
 [ ! -e "$install_home/.local/bin/cxt" ] && [ ! -L "$install_home/.local/bin/cxt" ] || fail 'uninstall left the managed link behind'
 assert_count 0 '# >>> script-store cxt >>>' "$install_home/.zshrc"
+assert_count 0 '# >>> script-store cxt completion >>>' "$install_home/.zshrc"
 assert_file_contains "$install_home/.zshrc" '# Keep this ~/.local/bin note'
 assert_file_contains "$install_home/.zshrc" 'export EDITOR=vim'
 
@@ -493,6 +595,7 @@ HOME="$legacy_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" > "$legacy
 [ "$(readlink "$legacy_home/.local/bin/cxt")" = "$CXT" ] || fail 'migrated cxt link target is incorrect'
 [ ! -e "$legacy_home/.local/bin/cx" ] && [ ! -L "$legacy_home/.local/bin/cx" ] || fail 'migration left the managed cx link behind'
 assert_count 1 '# >>> script-store cxt >>>' "$legacy_home/.zshrc"
+assert_count 1 '# >>> script-store cxt completion >>>' "$legacy_home/.zshrc"
 assert_count 0 '# >>> script-store cx >>>' "$legacy_home/.zshrc"
 assert_file_contains "$legacy_home/.zshrc" '# keep legacy migration content'
 assert_file_contains "$legacy_home/install.out" 'Removed managed legacy cx link'
@@ -501,6 +604,7 @@ assert_file_contains "$legacy_home/install.out" 'Renamed the managed cx PATH blo
 HOME="$legacy_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall > "$legacy_home/uninstall.out"
 [ ! -e "$legacy_home/.local/bin/cxt" ] && [ ! -L "$legacy_home/.local/bin/cxt" ] || fail 'uninstall left the migrated cxt link behind'
 assert_count 0 '# >>> script-store cxt >>>' "$legacy_home/.zshrc"
+assert_count 0 '# >>> script-store cxt completion >>>' "$legacy_home/.zshrc"
 
 legacy_modified_home="$TMP_ROOT/legacy-modified-home"
 mkdir -p "$legacy_modified_home/.local/bin"
@@ -581,13 +685,99 @@ mkdir -p "$configured_home"
 printf 'export PATH="$PATH:$HOME/.local/bin"\n' > "$configured_home/.bashrc"
 HOME="$configured_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --shell bash
 assert_count 0 '# >>> script-store cxt >>>' "$configured_home/.bashrc"
+assert_count 1 '# >>> script-store cxt completion >>>' "$configured_home/.bashrc"
+assert_file_contains "$configured_home/.bashrc" "$BASH_COMPLETION"
+HOME="$configured_home" PATH="$ORIGINAL_PATH" \
+  bash -c 'source "$1"; complete -p cxt >/dev/null' bash "$configured_home/.bashrc" || \
+  fail 'installed bash completion did not register cxt'
 
 path_home="$TMP_ROOT/path-home"
 mkdir -p "$path_home/.local/bin"
 printf '# keep me\n' > "$path_home/.bashrc"
 HOME="$path_home" SHELL=/bin/bash PATH="$path_home/.local/bin/:$ORIGINAL_PATH" "$INSTALLER"
 assert_count 0 '# >>> script-store cxt >>>' "$path_home/.bashrc"
+assert_count 1 '# >>> script-store cxt completion >>>' "$path_home/.bashrc"
 assert_file_contains "$path_home/.bashrc" '# keep me'
+
+rollback_home="$TMP_ROOT/rollback-home"
+rollback_fixture="$TMP_ROOT/fail-completion-write.bash"
+mkdir -p "$rollback_home"
+cat > "$rollback_fixture" <<'EOF'
+printf() {
+  if [ "${1:-}" = '%s\n%s\n%s\n' ] && \
+    [ "${2:-}" = '# >>> script-store cxt completion >>>' ]; then
+    return 1
+  fi
+  builtin printf "$@"
+}
+EOF
+set +e
+HOME="$rollback_home" \
+  SHELL=/bin/bash \
+  PATH="$ORIGINAL_PATH" \
+  BASH_ENV="$rollback_fixture" \
+  "$INSTALLER" > "$rollback_home/stdout" 2> "$rollback_home/stderr"
+rollback_status=$?
+set -e
+[ "$rollback_status" -ne 0 ] || fail 'installer accepted a forced completion write failure'
+[ ! -e "$rollback_home/.bashrc" ] && [ ! -L "$rollback_home/.bashrc" ] || \
+  fail 'rollback left a newly created rc file behind'
+[ ! -e "$rollback_home/.local/bin/cxt" ] && [ ! -L "$rollback_home/.local/bin/cxt" ] || \
+  fail 'rollback left the newly created cxt link behind'
+assert_file_contains "$rollback_home/stderr" 'could not update rc file'
+assert_file_contains "$rollback_home/stderr" 'Rolled back the failed cxt operation.'
+
+uninstall_rollback_home="$TMP_ROOT/uninstall-rollback-home"
+uninstall_rollback_fixture="$TMP_ROOT/fail-cxt-link-removal.bash"
+mkdir -p "$uninstall_rollback_home"
+HOME="$uninstall_rollback_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$uninstall_rollback_home/install.out"
+cp "$uninstall_rollback_home/.bashrc" "$uninstall_rollback_home/.bashrc.before"
+cat > "$uninstall_rollback_fixture" <<'EOF'
+rm() {
+  case "${1:-}" in
+    */.local/bin/cxt) return 1 ;;
+  esac
+  command rm "$@"
+}
+EOF
+set +e
+HOME="$uninstall_rollback_home" \
+  SHELL=/bin/bash \
+  PATH="$ORIGINAL_PATH" \
+  BASH_ENV="$uninstall_rollback_fixture" \
+  "$INSTALLER" --uninstall \
+    > "$uninstall_rollback_home/stdout" 2> "$uninstall_rollback_home/stderr"
+uninstall_rollback_status=$?
+set -e
+[ "$uninstall_rollback_status" -ne 0 ] || fail 'uninstaller accepted a forced link removal failure'
+[ -L "$uninstall_rollback_home/.local/bin/cxt" ] || \
+  fail 'uninstall rollback did not preserve the managed cxt link'
+[ "$(readlink "$uninstall_rollback_home/.local/bin/cxt")" = "$CXT" ] || \
+  fail 'uninstall rollback restored the wrong cxt link target'
+cmp -s "$uninstall_rollback_home/.bashrc.before" "$uninstall_rollback_home/.bashrc" || \
+  fail 'uninstall rollback did not restore the rc file'
+assert_file_contains "$uninstall_rollback_home/stderr" 'could not remove managed link'
+assert_file_contains "$uninstall_rollback_home/stderr" 'Rolled back the failed cxt operation.'
+
+completion_modified_home="$TMP_ROOT/completion-modified-home"
+mkdir -p "$completion_modified_home/.local/bin"
+ln -s "$CXT" "$completion_modified_home/.local/bin/cxt"
+printf '%s\n' \
+  '# >>> script-store cxt completion >>>' \
+  'source /tmp/user-modified-cxt-completion' \
+  '# <<< script-store cxt completion <<<' > "$completion_modified_home/.bashrc"
+cp "$completion_modified_home/.bashrc" "$completion_modified_home/.bashrc.before"
+set +e
+HOME="$completion_modified_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall \
+  > "$completion_modified_home/stdout" 2> "$completion_modified_home/stderr"
+completion_modified_status=$?
+set -e
+[ "$completion_modified_status" -ne 0 ] || fail 'uninstaller accepted a modified completion marker block'
+[ -L "$completion_modified_home/.local/bin/cxt" ] || fail 'completion preflight removed cxt link'
+cmp -s "$completion_modified_home/.bashrc.before" "$completion_modified_home/.bashrc" || \
+  fail 'installer changed a modified completion marker block'
+assert_file_contains "$completion_modified_home/stderr" 'found a modified cxt completion marker block'
 
 collision_home="$TMP_ROOT/collision-home"
 mkdir -p "$collision_home/.local/bin"
@@ -616,6 +806,7 @@ HOME="$dry_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --dry-run > 
 assert_file_contains "$TMP_ROOT/dry-run.out" 'Would create directory'
 assert_file_contains "$TMP_ROOT/dry-run.out" 'Would create link'
 assert_file_contains "$TMP_ROOT/dry-run.out" 'Would add the managed PATH block'
+assert_file_contains "$TMP_ROOT/dry-run.out" 'Would add the managed completion block'
 
 legacy_dry_home="$TMP_ROOT/legacy-dry-home"
 mkdir -p "$legacy_dry_home/.local/bin"

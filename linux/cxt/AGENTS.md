@@ -15,7 +15,9 @@ This file applies only to `linux/cxt/`.
 - Preserve transparent pass-through for every non-cxt argument.
 - Interpret cxt shortcuts only before `--`; everything after `--` must retain its original argument boundary and value.
 - Keep model, reasoning, and permission shortcuts independently composable, with at most one cxt shortcut from each group.
-- Whenever a shortcut contract changes, update all four surfaces together: `bin/cxt`, its `--cxt-help` output, `README.md`, and `tests/test-cxt.sh`.
+- Whenever a shortcut contract changes, update every exposed surface together: `bin/cxt`, its `--cxt-help` output, both files under `completions/`, `README.md`, and `tests/test-cxt.sh`.
+- Keep Bash/Zsh completion aligned with the session-management contract. Session arguments for attach and single-session kill may complete only valid live `codex-*` tmux session names; never expose general tmux sessions.
+- Whenever completion behavior changes, update `completions/cxt.bash`, `completions/cxt.zsh`, `install-cxt.sh`, `README.md`, and `tests/test-cxt.sh` together.
 - Keep `bin/cxt` and `install-cxt.sh` compatible with Bash 3.2 where practical. Do not introduce associative arrays or unsafe empty-array expansion under nounset.
 - Do not add npm or Node.js as a runtime dependency. A maintenance-only documentation helper may use Node when it is already provided by Codex.
 - Do not replace the absolute symlink installation model or edit a user's real shell rc files during tests.
@@ -29,6 +31,8 @@ Run from `linux/cxt/`:
 ```bash
 bash -n bin/cxt
 bash -n install-cxt.sh
+bash -n completions/cxt.bash
+zsh -n completions/cxt.zsh
 bash -n tests/test-cxt.sh
 ./tests/test-cxt.sh
 git diff --check

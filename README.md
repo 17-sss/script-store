@@ -100,17 +100,20 @@ cxt
 cxt --xhigh
 cxt --madmax
 cxt resume --last
+cxt --at <Tab>
 ```
 
 - 모든 실행에 `--no-alt-screen`을 기본 적용합니다.
 - `--xhigh`를 Codex의 최고 추론 강도 설정으로 변환합니다.
 - `--madmax`를 `--yolo`로 변환합니다. 승인과 sandbox를 우회하므로 신뢰할 수 있는 작업에서만 사용하세요.
 - tmux 안에서 실행하면 중첩 attach 대신 새 세션으로 현재 client를 전환합니다.
+- `--at`/`--attach`와 `--ks`/`--kill-session` 뒤에서 유효한 `codex-*` tmux 세션만 탭 완성합니다.
 
 | 파일 | 역할 |
 | --- | --- |
 | `bin/cxt` | tmux 세션을 만들고 인자를 변환해 Codex를 실행하는 본체 |
-| `install-cxt.sh` | `~/.local/bin/cxt` 심볼릭 링크와 필요한 PATH marker를 설치·제거 |
+| `completions/` | Bash/Zsh에서 cxt 세션과 편의 옵션을 탭 완성 |
+| `install-cxt.sh` | 심볼릭 링크와 필요한 PATH·completion marker를 설치·제거 |
 | `tests/test-cxt.sh` | mock Codex/tmux와 임시 HOME으로 실행·설치 동작을 검증 |
 
 Codex CLI가 필수이며 tmux는 선택 사항입니다. 설치 옵션과 정확한 인자 전달 규칙은 [cxt README](linux/cxt/README.md)를 참고하세요.

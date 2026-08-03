@@ -12,9 +12,9 @@ source ~/.zshrc # zsh
 # source ~/.bashrc # bash
 ```
 
-설치기는 `linux/cxt/bin/cxt`를 절대 경로로 `~/.local/bin/cxt`에 심볼릭 링크합니다. `~/.local/bin`이 현재 `PATH`와 선택한 rc 파일 어디에도 설정되어 있지 않을 때만 marker 블록을 추가합니다. 부모 셸의 환경은 직접 변경하지 않으므로 설치 후 rc 파일을 다시 읽거나 새 터미널을 열어야 합니다.
+설치기는 `linux/cxt/bin/cxt`를 절대 경로로 `~/.local/bin/cxt`에 심볼릭 링크합니다. `~/.local/bin`이 현재 `PATH`와 선택한 rc 파일 어디에도 설정되어 있지 않을 때만 PATH marker 블록을 추가하고, 선택한 Bash/Zsh용 탭 완성을 별도의 completion marker 블록으로 등록합니다. 부모 셸의 환경은 직접 변경하지 않으므로 설치 후 rc 파일을 다시 읽거나 새 터미널을 열어야 합니다.
 
-이전 `cx` 설치기가 만든 정확한 심볼릭 링크와 3줄짜리 PATH marker가 있으면 새 설치기가 `cxt`로 이전합니다. marker 내부가 수정되었거나 중복·손상된 경우에는 사용자 설정으로 간주해 링크와 rc 파일을 변경하기 전에 중단합니다. 사용자가 직접 만든 `~/.local/bin/cx` 파일이나 다른 대상을 가리키는 링크도 변경하지 않습니다.
+이전 `cx` 설치기가 만든 정확한 심볼릭 링크와 3줄짜리 PATH marker가 있으면 새 설치기가 `cxt`로 이전합니다. marker 내부가 수정되었거나 중복·손상된 경우에는 사용자 설정으로 간주해 링크와 rc 파일을 변경하기 전에 중단합니다. 사용자가 직접 만든 `~/.local/bin/cx` 파일이나 다른 대상을 가리키는 링크도 변경하지 않습니다. 설치나 제거 도중 후속 단계가 실패하면 시작 전 rc 파일과 관리 링크 상태로 되돌립니다. 롤백 자체가 실패한 경로는 오류 메시지로 남겨 수동 확인할 수 있게 합니다.
 
 셸 또는 rc 파일을 명시하거나 변경 내용을 미리 볼 수 있습니다.
 
@@ -70,6 +70,15 @@ cxt --ka
 ```
 
 tmux 안에서 attach를 실행하면 nested attach 대신 해당 cxt 세션으로 client를 전환합니다. 세션 이름을 직접 지정할 때는 정확한 `codex-...` 이름만 허용하며, 일반 tmux 세션은 attach나 종료 대상이 되지 않습니다. `--ka`는 현재 cxt 세션을 마지막에 종료하므로 cxt 안에서도 다른 cxt 세션을 먼저 모두 닫을 수 있습니다.
+
+설치 후 rc 파일을 다시 읽으면 attach와 단일 종료 대상도 탭으로 고를 수 있습니다. 후보는 현재 tmux 서버의 유효한 `codex-*` 세션만 실시간으로 표시하며 일반 tmux 세션은 노출하지 않습니다. 공백형과 `=`형을 모두 지원합니다.
+
+```bash
+cxt --at <Tab>
+cxt --attach=<Tab>
+cxt --ks <Tab>
+cxt --kill-session=<Tab>
+```
 
 ## 편의 옵션
 
@@ -133,4 +142,4 @@ cxt --cxt-help
 ./linux/cxt/tests/test-cxt.sh
 ```
 
-ShellCheck가 설치되어 있으면 테스트 중 자동으로 두 실행 스크립트를 검사합니다.
+ShellCheck가 설치되어 있으면 테스트 중 Bash 실행 스크립트와 completion을 자동으로 검사합니다.
