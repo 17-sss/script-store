@@ -502,6 +502,68 @@ HOME="$legacy_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstal
 [ ! -e "$legacy_home/.local/bin/cxt" ] && [ ! -L "$legacy_home/.local/bin/cxt" ] || fail 'uninstall left the migrated cxt link behind'
 assert_count 0 '# >>> script-store cxt >>>' "$legacy_home/.zshrc"
 
+legacy_modified_home="$TMP_ROOT/legacy-modified-home"
+mkdir -p "$legacy_modified_home/.local/bin"
+ln -s "$LEGACY_CX" "$legacy_modified_home/.local/bin/cx"
+printf '%s\n' \
+  '# >>> script-store cx >>>' \
+  'export PATH="$HOME/.local/bin:$PATH"' \
+  'export KEEP_ME_FROM_USER=1' \
+  '# <<< script-store cx <<<' > "$legacy_modified_home/.zshrc"
+cp "$legacy_modified_home/.zshrc" "$legacy_modified_home/.zshrc.before"
+set +e
+HOME="$legacy_modified_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$legacy_modified_home/stdout" 2> "$legacy_modified_home/stderr"
+legacy_modified_status=$?
+set -e
+[ "$legacy_modified_status" -ne 0 ] || fail 'installer accepted a modified legacy marker block'
+[ ! -e "$legacy_modified_home/.local/bin/cxt" ] && [ ! -L "$legacy_modified_home/.local/bin/cxt" ] || \
+  fail 'modified legacy marker preflight created the cxt link'
+[ -L "$legacy_modified_home/.local/bin/cx" ] || fail 'modified legacy marker preflight removed the cx link'
+cmp -s "$legacy_modified_home/.zshrc.before" "$legacy_modified_home/.zshrc" || \
+  fail 'installer changed a modified legacy marker block'
+assert_file_contains "$legacy_modified_home/stderr" 'found a modified cx marker block'
+
+legacy_malformed_home="$TMP_ROOT/legacy-malformed-home"
+mkdir -p "$legacy_malformed_home/.local/bin"
+ln -s "$LEGACY_CX" "$legacy_malformed_home/.local/bin/cx"
+printf '%s\n' \
+  '# >>> script-store cx >>>' \
+  'export PATH="$HOME/.local/bin:$PATH"' > "$legacy_malformed_home/.zshrc"
+cp "$legacy_malformed_home/.zshrc" "$legacy_malformed_home/.zshrc.before"
+set +e
+HOME="$legacy_malformed_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$legacy_malformed_home/stdout" 2> "$legacy_malformed_home/stderr"
+legacy_malformed_status=$?
+set -e
+[ "$legacy_malformed_status" -ne 0 ] || fail 'installer accepted a malformed legacy marker block'
+[ ! -e "$legacy_malformed_home/.local/bin/cxt" ] && [ ! -L "$legacy_malformed_home/.local/bin/cxt" ] || \
+  fail 'malformed legacy marker preflight created the cxt link'
+[ -L "$legacy_malformed_home/.local/bin/cx" ] || fail 'malformed legacy marker preflight removed the cx link'
+cmp -s "$legacy_malformed_home/.zshrc.before" "$legacy_malformed_home/.zshrc" || \
+  fail 'installer changed a malformed legacy marker block'
+assert_file_contains "$legacy_malformed_home/stderr" 'found a malformed or duplicate cx marker block'
+
+current_modified_home="$TMP_ROOT/current-modified-home"
+mkdir -p "$current_modified_home/.local/bin"
+ln -s "$CXT" "$current_modified_home/.local/bin/cxt"
+printf '%s\n' \
+  '# >>> script-store cxt >>>' \
+  'export PATH="$HOME/.local/bin:$PATH"' \
+  'export KEEP_CURRENT_USER_LINE=1' \
+  '# <<< script-store cxt <<<' > "$current_modified_home/.bashrc"
+cp "$current_modified_home/.bashrc" "$current_modified_home/.bashrc.before"
+set +e
+HOME="$current_modified_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall \
+  > "$current_modified_home/stdout" 2> "$current_modified_home/stderr"
+current_modified_status=$?
+set -e
+[ "$current_modified_status" -ne 0 ] || fail 'uninstaller accepted a modified cxt marker block'
+[ -L "$current_modified_home/.local/bin/cxt" ] || fail 'uninstaller removed cxt before marker preflight'
+cmp -s "$current_modified_home/.bashrc.before" "$current_modified_home/.bashrc" || \
+  fail 'uninstaller changed a modified cxt marker block'
+assert_file_contains "$current_modified_home/stderr" 'found a modified cxt marker block'
+
 legacy_other_target="$TMP_ROOT/user-managed-cx"
 printf '#!/usr/bin/env bash\n' > "$legacy_other_target"
 legacy_other_home="$TMP_ROOT/legacy-other-home"

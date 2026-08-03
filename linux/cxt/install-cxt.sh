@@ -50,25 +50,70 @@ marker_state() {
   local marker_end="${3:-$MARKER_END}"
 
   [ -f "$rc_file" ] || return 1
-  awk -v marker_begin="$marker_begin" -v marker_end="$marker_end" '
-    BEGIN { inside = 0; seen = 0; malformed = 0 }
+  awk \
+    -v marker_begin="$marker_begin" \
+    -v marker_end="$marker_end" \
+    -v path_line="$PATH_LINE" '
+    BEGIN {
+      inside = 0
+      seen = 0
+      malformed = 0
+      modified = 0
+      content_lines = 0
+    }
     $0 == marker_begin {
-      if (inside) malformed = 1
+      if (inside || seen) malformed = 1
       inside = 1
       seen = 1
+      content_lines = 0
       next
     }
     $0 == marker_end {
       if (!inside) malformed = 1
+      if (inside && (content_lines != 1 || content != path_line)) modified = 1
       inside = 0
+      next
+    }
+    inside {
+      content_lines++
+      if (content_lines == 1) content = $0
+      else modified = 1
       next
     }
     END {
       if (inside || malformed) exit 2
-      if (seen) exit 0
-      exit 1
+      if (!seen) exit 1
+      if (modified) exit 3
+      exit 0
     }
   ' "$rc_file"
+}
+
+preflight_marker_block() {
+  local rc_file="$1"
+  local marker_begin="$2"
+  local marker_end="$3"
+  local marker_name="$4"
+  local state
+
+  marker_state "$rc_file" "$marker_begin" "$marker_end"
+  state=$?
+  case "$state" in
+    0|1) return 0 ;;
+    2) die "found a malformed or duplicate $marker_name marker block in $rc_file; remove or repair it manually" ;;
+    3) die "found a modified $marker_name marker block in $rc_file; leaving it unchanged for manual review" ;;
+  esac
+}
+
+preflight_marker_blocks() {
+  local rc_file="$1"
+
+  if { [ -e "$rc_file" ] || [ -L "$rc_file" ]; } && [ ! -f "$rc_file" ]; then
+    die "rc file is not a regular file: $rc_file"
+  fi
+
+  preflight_marker_block "$rc_file" "$MARKER_BEGIN" "$MARKER_END" cxt
+  preflight_marker_block "$rc_file" "$LEGACY_MARKER_BEGIN" "$LEGACY_MARKER_END" cx
 }
 
 rc_has_local_bin() {
@@ -124,7 +169,8 @@ remove_marker_blocks() {
   state=$?
   case "$state" in
     1) return 0 ;;
-    2) die "found a malformed $marker_name marker block in $rc_file; remove or repair it manually" ;;
+    2) die "found a malformed or duplicate $marker_name marker block in $rc_file; remove or repair it manually" ;;
+    3) die "found a modified $marker_name marker block in $rc_file; leaving it unchanged for manual review" ;;
   esac
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -158,7 +204,8 @@ migrate_legacy_marker_block() {
   legacy_state=$?
   case "$legacy_state" in
     1) return 0 ;;
-    2) die "found a malformed cx marker block in $rc_file; remove or repair it manually" ;;
+    2) die "found a malformed or duplicate cx marker block in $rc_file; remove or repair it manually" ;;
+    3) die "found a modified cx marker block in $rc_file; leaving it unchanged for manual review" ;;
   esac
 
   marker_state "$rc_file"
@@ -169,7 +216,10 @@ migrate_legacy_marker_block() {
       return 0
       ;;
     2)
-      die "found a malformed cxt marker block in $rc_file; remove or repair it manually"
+      die "found a malformed or duplicate cxt marker block in $rc_file; remove or repair it manually"
+      ;;
+    3)
+      die "found a modified cxt marker block in $rc_file; leaving it unchanged for manual review"
       ;;
   esac
 
@@ -303,6 +353,9 @@ LEGACY_DESTINATION="$BIN_DIR/cx"
 
 [ -f "$SOURCE" ] || die "cxt executable not found: $SOURCE"
 
+# Validate every managed rc block before changing either the rc file or links.
+preflight_marker_blocks "$RC_FILE"
+
 if [ "$UNINSTALL" -eq 1 ]; then
   remove_marker_blocks "$RC_FILE" "$MARKER_BEGIN" "$MARKER_END" cxt
   remove_marker_blocks "$RC_FILE" "$LEGACY_MARKER_BEGIN" "$LEGACY_MARKER_END" cx
@@ -342,7 +395,6 @@ else
   fi
 fi
 
-migrate_legacy_link
 migrate_legacy_marker_block "$RC_FILE"
 
 marker_state "$RC_FILE"
@@ -352,7 +404,10 @@ case "$marker_status" in
     printf 'Managed PATH block is already present in %s\n' "$RC_FILE"
     ;;
   2)
-    die "found a malformed cxt marker block in $RC_FILE; remove or repair it manually"
+    die "found a malformed or duplicate cxt marker block in $RC_FILE; remove or repair it manually"
+    ;;
+  3)
+    die "found a modified cxt marker block in $RC_FILE; leaving it unchanged for manual review"
     ;;
   *)
     if path_has_local_bin; then
@@ -364,6 +419,10 @@ case "$marker_status" in
     fi
     ;;
 esac
+
+# Keep the old managed launcher available until the new link and rc setup have
+# both completed successfully.
+migrate_legacy_link
 
 printf '\nInstallation complete. This installer cannot modify the parent shell environment.\n'
 printf 'Run the following command, or open a new terminal:\n'
