@@ -3,11 +3,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-CX_DIR="${SCRIPT_DIR%/tests}"
-CX="$CX_DIR/bin/cx"
-INSTALLER="$CX_DIR/install-cx.sh"
+CXT_DIR="${SCRIPT_DIR%/tests}"
+CXT="$CXT_DIR/bin/cxt"
+INSTALLER="$CXT_DIR/install-cxt.sh"
+LEGACY_CX="${CXT_DIR%/*}/cx/bin/cx"
 ORIGINAL_PATH="$PATH"
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cx-test.XXXXXX")"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cxt-test.XXXXXX")"
 
 cleanup() {
   rm -rf "$TMP_ROOT"
@@ -72,11 +73,11 @@ make_codex_mock() {
   local bin_dir="$1"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
-: > "$CX_CODEX_LOG"
+: > "$CXT_CODEX_LOG"
 for mock_arg in "$@"; do
-  printf '%s\0' "$mock_arg" >> "$CX_CODEX_LOG"
+  printf '%s\0' "$mock_arg" >> "$CXT_CODEX_LOG"
 done
-exit "${CX_CODEX_EXIT_CODE:-0}"
+exit "${CXT_CODEX_EXIT_CODE:-0}"
 EOF
   chmod +x "$bin_dir/codex"
 }
@@ -86,26 +87,26 @@ make_tmux_mock() {
   cat > "$bin_dir/tmux" <<'EOF'
 #!/usr/bin/env bash
 call_number=0
-if [ -r "$CX_TMUX_COUNT" ]; then
-  IFS= read -r call_number < "$CX_TMUX_COUNT"
+if [ -r "$CXT_TMUX_COUNT" ]; then
+  IFS= read -r call_number < "$CXT_TMUX_COUNT"
 fi
 call_number=$((call_number + 1))
-printf '%s\n' "$call_number" > "$CX_TMUX_COUNT"
-: > "$CX_TMUX_LOG.$call_number"
+printf '%s\n' "$call_number" > "$CXT_TMUX_COUNT"
+: > "$CXT_TMUX_LOG.$call_number"
 for mock_arg in "$@"; do
-  printf '%s\0' "$mock_arg" >> "$CX_TMUX_LOG.$call_number"
+  printf '%s\0' "$mock_arg" >> "$CXT_TMUX_LOG.$call_number"
 done
 
 case "${1:-}" in
   list-sessions)
-    if [ -r "${CX_TMUX_SESSIONS:-}" ]; then
+    if [ -r "${CXT_TMUX_SESSIONS:-}" ]; then
       while IFS= read -r mock_session || [ -n "$mock_session" ]; do
         printf '%s\n' "$mock_session"
-      done < "$CX_TMUX_SESSIONS"
+      done < "$CXT_TMUX_SESSIONS"
     fi
     ;;
   display-message)
-    printf '%s\n' "${CX_TMUX_CURRENT_SESSION:-}"
+    printf '%s\n' "${CXT_TMUX_CURRENT_SESSION:-}"
     ;;
 esac
 
@@ -125,9 +126,9 @@ run_direct_case() {
   make_codex_mock "$mock_bin"
   (
     cd "$case_root/project"
-    PATH="$mock_bin" CX_CODEX_LOG="$case_root/codex.args" "$CX" "$@"
+    PATH="$mock_bin" CXT_CODEX_LOG="$case_root/codex.args" "$CXT" "$@"
   ) 2> "$case_root/stderr"
-  assert_file_contains "$case_root/stderr" 'cx: tmux not found; launching Codex directly'
+  assert_file_contains "$case_root/stderr" 'cxt: tmux not found; launching Codex directly'
   DIRECT_LOG="$case_root/codex.args"
 }
 
@@ -144,33 +145,33 @@ assert_shortcut_conflict() {
   set +e
   (
     cd "$case_root/project"
-    PATH="$case_root/bin" CX_CODEX_LOG="$case_root/codex.args" "$CX" "$@"
+    PATH="$case_root/bin" CXT_CODEX_LOG="$case_root/codex.args" "$CXT" "$@"
   ) 2> "$case_root/stderr"
   conflict_status=$?
   set -e
 
   [ "$conflict_status" -eq 2 ] || fail "$category shortcut conflict returned $conflict_status instead of 2"
-  assert_file_contains "$case_root/stderr" "cx: $category shortcuts cannot be combined"
+  assert_file_contains "$case_root/stderr" "cxt: $category shortcuts cannot be combined"
   [ ! -e "$case_root/codex.args" ] || fail "$category shortcut conflict launched Codex"
 }
 
-bash -n "$CX"
+bash -n "$CXT"
 bash -n "$INSTALLER"
 bash -n "$0"
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -s bash "$CX" "$INSTALLER"
+  shellcheck -s bash "$CXT" "$INSTALLER"
 else
   printf 'SKIP: ShellCheck is not installed\n'
 fi
 
-"$CX" --cx-help > "$TMP_ROOT/cx-help"
-assert_file_contains "$TMP_ROOT/cx-help" 'Usage: cx [CX_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
-assert_file_contains "$TMP_ROOT/cx-help" '--sol       --model gpt-5.6-sol'
-assert_file_contains "$TMP_ROOT/cx-help" '--safe       read-only + untrusted approvals'
-assert_file_contains "$TMP_ROOT/cx-help" '--attach, --at [SESSION]'
-assert_file_contains "$TMP_ROOT/cx-help" '--kill-session, --ks [SESSION]'
-assert_file_contains "$TMP_ROOT/cx-help" '--kill-all, --ka'
+"$CXT" --cxt-help > "$TMP_ROOT/cxt-help"
+assert_file_contains "$TMP_ROOT/cxt-help" 'Usage: cxt [CXT_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
+assert_file_contains "$TMP_ROOT/cxt-help" '--sol       --model gpt-5.6-sol'
+assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + untrusted approvals'
+assert_file_contains "$TMP_ROOT/cxt-help" '--attach, --at [SESSION]'
+assert_file_contains "$TMP_ROOT/cxt-help" '--kill-session, --ks [SESSION]'
+assert_file_contains "$TMP_ROOT/cxt-help" '--kill-all, --ka'
 
 run_direct_case empty
 assert_args "$DIRECT_LOG" --no-alt-screen
@@ -250,8 +251,8 @@ if command -v zsh >/dev/null 2>&1; then
   mkdir -p "$zsh_case/project"
   make_minimal_bin "$zsh_case/bin"
   make_codex_mock "$zsh_case/bin"
-  CX_PATH="$CX" MOCK_PATH="$zsh_case/bin" CX_CODEX_LOG="$zsh_case/codex.args" \
-    zsh -c 'cd "$1" && PATH="$MOCK_PATH" "$CX_PATH" --madmax' zsh "$zsh_case/project" \
+  CXT_PATH="$CXT" MOCK_PATH="$zsh_case/bin" CXT_CODEX_LOG="$zsh_case/codex.args" \
+    zsh -c 'cd "$1" && PATH="$MOCK_PATH" "$CXT_PATH" --madmax' zsh "$zsh_case/project" \
     2> "$zsh_case/stderr"
   assert_args "$zsh_case/codex.args" --no-alt-screen --yolo
 fi
@@ -262,12 +263,12 @@ make_minimal_bin "$missing_root/bin"
 set +e
 (
   cd "$missing_root/project"
-  PATH="$missing_root/bin" "$CX"
+  PATH="$missing_root/bin" "$CXT"
 ) 2> "$missing_root/stderr"
 missing_status=$?
 set -e
 [ "$missing_status" -eq 127 ] || fail "missing codex returned $missing_status instead of 127"
-assert_file_contains "$missing_root/stderr" 'cx: codex command not found'
+assert_file_contains "$missing_root/stderr" 'cxt: codex command not found'
 
 # Session management tests use only the mock tmux state below. They do not
 # inspect or mutate the tmux server that launched this test process.
@@ -284,10 +285,10 @@ printf '%s\n' \
   unset TMUX
   cd "$session_root/project"
   PATH="$session_root/bin" \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    "$CX" --at
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    "$CXT" --at
 )
 assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
 assert_args "$session_root/tmux.args.2" attach-session -t codex-project-new
@@ -297,10 +298,10 @@ rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
   cd "$session_root/project"
   PATH="$session_root/bin" \
     TMUX='/tmp/mock-tmux,1,0' \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    "$CX" --attach codex-project-old
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    "$CXT" --attach codex-project-old
 )
 assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
 assert_args "$session_root/tmux.args.2" switch-client -t codex-project-old
@@ -310,10 +311,10 @@ rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
   unset TMUX
   cd "$session_root/project"
   PATH="$session_root/bin" \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    "$CX" --ks
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    "$CXT" --ks
 )
 assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
 assert_args "$session_root/tmux.args.2" kill-session -t codex-project-new
@@ -323,11 +324,11 @@ rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
   cd "$session_root/project"
   PATH="$session_root/bin" \
     TMUX='/tmp/mock-tmux,1,0' \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    CX_TMUX_CURRENT_SESSION=codex-project-old \
-    "$CX" --kill-session
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    CXT_TMUX_CURRENT_SESSION=codex-project-old \
+    "$CXT" --kill-session
 )
 assert_args "$session_root/tmux.args.1" display-message -p '#{session_name}'
 assert_args "$session_root/tmux.args.2" list-sessions -F '#{session_created}:#{session_name}'
@@ -338,11 +339,11 @@ rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
   cd "$session_root/project"
   PATH="$session_root/bin" \
     TMUX='/tmp/mock-tmux,1,0' \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    CX_TMUX_CURRENT_SESSION=codex-project-old \
-    "$CX" --ka
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    CXT_TMUX_CURRENT_SESSION=codex-project-old \
+    "$CXT" --ka
 )
 assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
 assert_args "$session_root/tmux.args.2" display-message -p '#{session_name}'
@@ -355,33 +356,33 @@ set +e
   unset TMUX
   cd "$session_root/project"
   PATH="$session_root/bin" \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    "$CX" --at work
-) 2> "$session_root/non-cx.stderr"
-non_cx_status=$?
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    "$CXT" --at work
+) 2> "$session_root/non-cxt.stderr"
+non_cxt_status=$?
 set -e
-[ "$non_cx_status" -eq 2 ] || fail "non-cx attach returned $non_cx_status instead of 2"
-assert_file_contains "$session_root/non-cx.stderr" 'cx: not a cx tmux session: work'
-[ ! -e "$session_root/tmux.count" ] || fail 'non-cx attach called tmux'
+[ "$non_cxt_status" -eq 2 ] || fail "non-cxt attach returned $non_cxt_status instead of 2"
+assert_file_contains "$session_root/non-cxt.stderr" 'cxt: not a cxt tmux session: work'
+[ ! -e "$session_root/tmux.count" ] || fail 'non-cxt attach called tmux'
 
 rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
-printf '%s\n' '400:work' > "$session_root/no-cx-sessions"
+printf '%s\n' '400:work' > "$session_root/no-cxt-sessions"
 set +e
 (
   unset TMUX
   cd "$session_root/project"
   PATH="$session_root/bin" \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/no-cx-sessions" \
-    "$CX" --attach
-) 2> "$session_root/no-cx.stderr"
-no_cx_status=$?
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/no-cxt-sessions" \
+    "$CXT" --attach
+) 2> "$session_root/no-cxt.stderr"
+no_cxt_status=$?
 set -e
-[ "$no_cx_status" -eq 1 ] || fail "empty cx attach returned $no_cx_status instead of 1"
-assert_file_contains "$session_root/no-cx.stderr" 'cx: no cx tmux sessions found'
+[ "$no_cxt_status" -eq 1 ] || fail "empty cxt attach returned $no_cxt_status instead of 1"
+assert_file_contains "$session_root/no-cxt.stderr" 'cxt: no cxt tmux sessions found'
 assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
 
 rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
@@ -389,30 +390,30 @@ set +e
 (
   cd "$session_root/project"
   PATH="$session_root/bin" \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    "$CX" --at --kill-all
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    "$CXT" --at --kill-all
 ) 2> "$session_root/action-conflict.stderr"
 action_conflict_status=$?
 set -e
 [ "$action_conflict_status" -eq 2 ] || fail "session action conflict returned $action_conflict_status instead of 2"
-assert_file_contains "$session_root/action-conflict.stderr" 'cx: session management shortcuts cannot be combined'
+assert_file_contains "$session_root/action-conflict.stderr" 'cxt: session management shortcuts cannot be combined'
 [ ! -e "$session_root/tmux.count" ] || fail 'session action conflict called tmux'
 
 set +e
 (
   cd "$session_root/project"
   PATH="$session_root/bin" \
-    CX_TMUX_COUNT="$session_root/tmux.count" \
-    CX_TMUX_LOG="$session_root/tmux.args" \
-    CX_TMUX_SESSIONS="$session_root/sessions" \
-    "$CX" --attach --safe
+    CXT_TMUX_COUNT="$session_root/tmux.count" \
+    CXT_TMUX_LOG="$session_root/tmux.args" \
+    CXT_TMUX_SESSIONS="$session_root/sessions" \
+    "$CXT" --attach --safe
 ) 2> "$session_root/action-codex-conflict.stderr"
 action_codex_status=$?
 set -e
 [ "$action_codex_status" -eq 2 ] || fail "session/Codex conflict returned $action_codex_status instead of 2"
-assert_file_contains "$session_root/action-codex-conflict.stderr" 'cx: session management options cannot be combined with Codex arguments'
+assert_file_contains "$session_root/action-codex-conflict.stderr" 'cxt: session management options cannot be combined with Codex arguments'
 [ ! -e "$session_root/tmux.count" ] || fail 'session/Codex conflict called tmux'
 
 missing_tmux_root="$TMP_ROOT/missing-tmux-management"
@@ -421,12 +422,12 @@ make_minimal_bin "$missing_tmux_root/bin"
 set +e
 (
   cd "$missing_tmux_root/project"
-  PATH="$missing_tmux_root/bin" "$CX" --ka
+  PATH="$missing_tmux_root/bin" "$CXT" --ka
 ) 2> "$missing_tmux_root/stderr"
 missing_tmux_status=$?
 set -e
 [ "$missing_tmux_status" -eq 127 ] || fail "missing tmux management returned $missing_tmux_status instead of 127"
-assert_file_contains "$missing_tmux_root/stderr" 'cx: tmux command not found'
+assert_file_contains "$missing_tmux_root/stderr" 'cxt: tmux command not found'
 
 tmux_root="$TMP_ROOT/tmux"
 tmux_project="$tmux_root/Project name+demo"
@@ -438,9 +439,9 @@ make_tmux_mock "$tmux_root/bin"
   unset TMUX
   cd "$tmux_project"
   PATH="$tmux_root/bin" \
-    CX_TMUX_COUNT="$tmux_root/tmux.count" \
-    CX_TMUX_LOG="$tmux_root/tmux.args" \
-    "$CX" --xhigh 'prompt with spaces'
+    CXT_TMUX_COUNT="$tmux_root/tmux.count" \
+    CXT_TMUX_LOG="$tmux_root/tmux.args" \
+    "$CXT" --xhigh 'prompt with spaces'
 )
 assert_args "$tmux_root/tmux.args.1" \
   new-session -d -s codex-Project-name-demo-000000 -c "$tmux_project" \
@@ -454,9 +455,9 @@ rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
   cd "$tmux_project"
   PATH="$tmux_root/bin" \
     TMUX='/tmp/mock-tmux,1,0' \
-    CX_TMUX_COUNT="$tmux_root/tmux.count" \
-    CX_TMUX_LOG="$tmux_root/tmux.args" \
-    "$CX" review
+    CXT_TMUX_COUNT="$tmux_root/tmux.count" \
+    CXT_TMUX_LOG="$tmux_root/tmux.args" \
+    "$CXT" review
 )
 assert_args "$tmux_root/tmux.args.4" switch-client -t codex-Project-name-demo-000000
 
@@ -465,53 +466,87 @@ install_home="$TMP_ROOT/install-home"
 mkdir -p "$install_home"
 printf '# Keep this ~/.local/bin note\nexport EDITOR=vim\n' > "$install_home/.zshrc"
 HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER"
-[ -L "$install_home/.local/bin/cx" ] || fail 'installer did not create the cx symlink'
-[ "$(readlink "$install_home/.local/bin/cx")" = "$CX" ] || fail 'installer link target is not the absolute cx path'
+[ -L "$install_home/.local/bin/cxt" ] || fail 'installer did not create the cxt symlink'
+[ "$(readlink "$install_home/.local/bin/cxt")" = "$CXT" ] || fail 'installer link target is not the absolute cxt path'
 assert_file_contains "$install_home/.zshrc" '# Keep this ~/.local/bin note'
 assert_file_contains "$install_home/.zshrc" 'export EDITOR=vim'
-assert_count 1 '# >>> script-store cx >>>' "$install_home/.zshrc"
+assert_count 1 '# >>> script-store cxt >>>' "$install_home/.zshrc"
 HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER"
-assert_count 1 '# >>> script-store cx >>>' "$install_home/.zshrc"
+assert_count 1 '# >>> script-store cxt >>>' "$install_home/.zshrc"
 
 HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall
-[ ! -e "$install_home/.local/bin/cx" ] && [ ! -L "$install_home/.local/bin/cx" ] || fail 'uninstall left the managed link behind'
-assert_count 0 '# >>> script-store cx >>>' "$install_home/.zshrc"
+[ ! -e "$install_home/.local/bin/cxt" ] && [ ! -L "$install_home/.local/bin/cxt" ] || fail 'uninstall left the managed link behind'
+assert_count 0 '# >>> script-store cxt >>>' "$install_home/.zshrc"
 assert_file_contains "$install_home/.zshrc" '# Keep this ~/.local/bin note'
 assert_file_contains "$install_home/.zshrc" 'export EDITOR=vim'
+
+legacy_home="$TMP_ROOT/legacy-home"
+mkdir -p "$legacy_home/.local/bin"
+ln -s "$LEGACY_CX" "$legacy_home/.local/bin/cx"
+printf '%s\n' \
+  '# keep legacy migration content' \
+  '# >>> script-store cx >>>' \
+  'export PATH="$HOME/.local/bin:$PATH"' \
+  '# <<< script-store cx <<<' > "$legacy_home/.zshrc"
+HOME="$legacy_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" > "$legacy_home/install.out"
+[ -L "$legacy_home/.local/bin/cxt" ] || fail 'migration did not create the cxt symlink'
+[ "$(readlink "$legacy_home/.local/bin/cxt")" = "$CXT" ] || fail 'migrated cxt link target is incorrect'
+[ ! -e "$legacy_home/.local/bin/cx" ] && [ ! -L "$legacy_home/.local/bin/cx" ] || fail 'migration left the managed cx link behind'
+assert_count 1 '# >>> script-store cxt >>>' "$legacy_home/.zshrc"
+assert_count 0 '# >>> script-store cx >>>' "$legacy_home/.zshrc"
+assert_file_contains "$legacy_home/.zshrc" '# keep legacy migration content'
+assert_file_contains "$legacy_home/install.out" 'Removed managed legacy cx link'
+assert_file_contains "$legacy_home/install.out" 'Renamed the managed cx PATH block to cxt'
+
+HOME="$legacy_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall > "$legacy_home/uninstall.out"
+[ ! -e "$legacy_home/.local/bin/cxt" ] && [ ! -L "$legacy_home/.local/bin/cxt" ] || fail 'uninstall left the migrated cxt link behind'
+assert_count 0 '# >>> script-store cxt >>>' "$legacy_home/.zshrc"
+
+legacy_other_target="$TMP_ROOT/user-managed-cx"
+printf '#!/usr/bin/env bash\n' > "$legacy_other_target"
+legacy_other_home="$TMP_ROOT/legacy-other-home"
+mkdir -p "$legacy_other_home/.local/bin"
+printf 'export PATH="$PATH:$HOME/.local/bin"\n' > "$legacy_other_home/.bashrc"
+ln -s "$legacy_other_target" "$legacy_other_home/.local/bin/cx"
+HOME="$legacy_other_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$legacy_other_home/stdout" 2> "$legacy_other_home/stderr"
+[ -L "$legacy_other_home/.local/bin/cxt" ] || fail 'installer did not create cxt beside a non-managed cx link'
+[ "$(readlink "$legacy_other_home/.local/bin/cx")" = "$legacy_other_target" ] || fail 'installer changed a non-managed cx link'
+assert_file_contains "$legacy_other_home/stderr" 'Left non-managed legacy cx path unchanged'
 
 configured_home="$TMP_ROOT/configured-home"
 mkdir -p "$configured_home"
 printf 'export PATH="$PATH:$HOME/.local/bin"\n' > "$configured_home/.bashrc"
 HOME="$configured_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --shell bash
-assert_count 0 '# >>> script-store cx >>>' "$configured_home/.bashrc"
+assert_count 0 '# >>> script-store cxt >>>' "$configured_home/.bashrc"
 
 path_home="$TMP_ROOT/path-home"
 mkdir -p "$path_home/.local/bin"
 printf '# keep me\n' > "$path_home/.bashrc"
 HOME="$path_home" SHELL=/bin/bash PATH="$path_home/.local/bin/:$ORIGINAL_PATH" "$INSTALLER"
-assert_count 0 '# >>> script-store cx >>>' "$path_home/.bashrc"
+assert_count 0 '# >>> script-store cxt >>>' "$path_home/.bashrc"
 assert_file_contains "$path_home/.bashrc" '# keep me'
 
 collision_home="$TMP_ROOT/collision-home"
 mkdir -p "$collision_home/.local/bin"
-printf 'user file\n' > "$collision_home/.local/bin/cx"
+printf 'user file\n' > "$collision_home/.local/bin/cxt"
 set +e
 HOME="$collision_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" > "$collision_home/stdout" 2> "$collision_home/stderr"
 collision_status=$?
 set -e
-[ "$collision_status" -ne 0 ] || fail 'installer accepted a conflicting cx file'
-[ "$(cat "$collision_home/.local/bin/cx")" = 'user file' ] || fail 'installer overwrote a conflicting cx file'
+[ "$collision_status" -ne 0 ] || fail 'installer accepted a conflicting cxt file'
+[ "$(cat "$collision_home/.local/bin/cxt")" = 'user file' ] || fail 'installer overwrote a conflicting cxt file'
 assert_file_contains "$collision_home/stderr" 'refusing to overwrite'
 
-other_target="$TMP_ROOT/other-cx"
+other_target="$TMP_ROOT/other-cxt"
 printf '#!/usr/bin/env bash\n' > "$other_target"
 other_link_home="$TMP_ROOT/other-link-home"
 mkdir -p "$other_link_home/.local/bin"
-ln -s "$other_target" "$other_link_home/.local/bin/cx"
+ln -s "$other_target" "$other_link_home/.local/bin/cxt"
 HOME="$other_link_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall \
   > "$other_link_home/stdout" 2> "$other_link_home/stderr"
-[ -L "$other_link_home/.local/bin/cx" ] || fail 'uninstall removed a non-managed link'
-[ "$(readlink "$other_link_home/.local/bin/cx")" = "$other_target" ] || fail 'uninstall changed a non-managed link'
+[ -L "$other_link_home/.local/bin/cxt" ] || fail 'uninstall removed a non-managed link'
+[ "$(readlink "$other_link_home/.local/bin/cxt")" = "$other_target" ] || fail 'uninstall changed a non-managed link'
 
 dry_home="$TMP_ROOT/dry-home"
 HOME="$dry_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --dry-run > "$TMP_ROOT/dry-run.out"
@@ -520,4 +555,19 @@ assert_file_contains "$TMP_ROOT/dry-run.out" 'Would create directory'
 assert_file_contains "$TMP_ROOT/dry-run.out" 'Would create link'
 assert_file_contains "$TMP_ROOT/dry-run.out" 'Would add the managed PATH block'
 
-printf 'cx tests passed\n'
+legacy_dry_home="$TMP_ROOT/legacy-dry-home"
+mkdir -p "$legacy_dry_home/.local/bin"
+ln -s "$LEGACY_CX" "$legacy_dry_home/.local/bin/cx"
+printf '%s\n' \
+  '# >>> script-store cx >>>' \
+  'export PATH="$HOME/.local/bin:$PATH"' \
+  '# <<< script-store cx <<<' > "$legacy_dry_home/.zshrc"
+HOME="$legacy_dry_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --dry-run > "$legacy_dry_home/dry-run.out"
+[ ! -e "$legacy_dry_home/.local/bin/cxt" ] && [ ! -L "$legacy_dry_home/.local/bin/cxt" ] || fail 'legacy dry-run created the cxt link'
+[ -L "$legacy_dry_home/.local/bin/cx" ] || fail 'legacy dry-run removed the cx link'
+assert_count 1 '# >>> script-store cx >>>' "$legacy_dry_home/.zshrc"
+assert_count 0 '# >>> script-store cxt >>>' "$legacy_dry_home/.zshrc"
+assert_file_contains "$legacy_dry_home/dry-run.out" 'Would remove managed legacy cx link'
+assert_file_contains "$legacy_dry_home/dry-run.out" 'Would rename the managed cx PATH block to cxt'
+
+printf 'cxt tests passed\n'

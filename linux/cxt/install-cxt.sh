@@ -3,13 +3,15 @@
 set -u
 
 PROGRAM_NAME="${0##*/}"
-MARKER_BEGIN='# >>> script-store cx >>>'
-MARKER_END='# <<< script-store cx <<<'
+MARKER_BEGIN='# >>> script-store cxt >>>'
+MARKER_END='# <<< script-store cxt <<<'
+LEGACY_MARKER_BEGIN='# >>> script-store cx >>>'
+LEGACY_MARKER_END='# <<< script-store cx <<<'
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 
 usage() {
   cat <<'EOF'
-Usage: install-cx.sh [options]
+Usage: install-cxt.sh [options]
 
 Options:
   --shell auto|zsh|bash  Select the shell rc file (default: auto)
@@ -44,9 +46,11 @@ resolve_script_path() {
 
 marker_state() {
   local rc_file="$1"
+  local marker_begin="${2:-$MARKER_BEGIN}"
+  local marker_end="${3:-$MARKER_END}"
 
   [ -f "$rc_file" ] || return 1
-  awk -v marker_begin="$MARKER_BEGIN" -v marker_end="$MARKER_END" '
+  awk -v marker_begin="$marker_begin" -v marker_end="$marker_end" '
     BEGIN { inside = 0; seen = 0; malformed = 0 }
     $0 == marker_begin {
       if (inside) malformed = 1
@@ -111,22 +115,25 @@ append_marker_block() {
 
 remove_marker_blocks() {
   local rc_file="$1"
+  local marker_begin="${2:-$MARKER_BEGIN}"
+  local marker_end="${3:-$MARKER_END}"
+  local marker_name="${4:-cxt}"
   local state temp_file
 
-  marker_state "$rc_file"
+  marker_state "$rc_file" "$marker_begin" "$marker_end"
   state=$?
   case "$state" in
     1) return 0 ;;
-    2) die "found a malformed cx marker block in $rc_file; remove or repair it manually" ;;
+    2) die "found a malformed $marker_name marker block in $rc_file; remove or repair it manually" ;;
   esac
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf 'Would remove the managed PATH block from %s\n' "$rc_file"
+    printf 'Would remove the managed %s PATH block from %s\n' "$marker_name" "$rc_file"
     return 0
   fi
 
-  temp_file="$(mktemp "${TMPDIR:-/tmp}/install-cx.XXXXXX")" || die 'could not create a temporary file'
-  if ! awk -v marker_begin="$MARKER_BEGIN" -v marker_end="$MARKER_END" '
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/install-cxt.XXXXXX")" || die 'could not create a temporary file'
+  if ! awk -v marker_begin="$marker_begin" -v marker_end="$marker_end" '
     $0 == marker_begin { inside = 1; next }
     $0 == marker_end { inside = 0; next }
     !inside { print }
@@ -140,7 +147,89 @@ remove_marker_blocks() {
     die "could not update rc file: $rc_file"
   fi
   rm -f "$temp_file"
-  printf 'Removed the managed PATH block from %s\n' "$rc_file"
+  printf 'Removed the managed %s PATH block from %s\n' "$marker_name" "$rc_file"
+}
+
+migrate_legacy_marker_block() {
+  local rc_file="$1"
+  local legacy_state current_state temp_file
+
+  marker_state "$rc_file" "$LEGACY_MARKER_BEGIN" "$LEGACY_MARKER_END"
+  legacy_state=$?
+  case "$legacy_state" in
+    1) return 0 ;;
+    2) die "found a malformed cx marker block in $rc_file; remove or repair it manually" ;;
+  esac
+
+  marker_state "$rc_file"
+  current_state=$?
+  case "$current_state" in
+    0)
+      remove_marker_blocks "$rc_file" "$LEGACY_MARKER_BEGIN" "$LEGACY_MARKER_END" cx
+      return 0
+      ;;
+    2)
+      die "found a malformed cxt marker block in $rc_file; remove or repair it manually"
+      ;;
+  esac
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'Would rename the managed cx PATH block to cxt in %s\n' "$rc_file"
+    return 0
+  fi
+
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/install-cxt.XXXXXX")" || die 'could not create a temporary file'
+  if ! awk \
+    -v legacy_begin="$LEGACY_MARKER_BEGIN" \
+    -v legacy_end="$LEGACY_MARKER_END" \
+    -v marker_begin="$MARKER_BEGIN" \
+    -v marker_end="$MARKER_END" '
+      $0 == legacy_begin { print marker_begin; next }
+      $0 == legacy_end { print marker_end; next }
+      { print }
+    ' "$rc_file" > "$temp_file"; then
+    rm -f "$temp_file"
+    die "could not prepare migrated rc file: $rc_file"
+  fi
+
+  if ! cp "$temp_file" "$rc_file"; then
+    rm -f "$temp_file"
+    die "could not migrate rc file: $rc_file"
+  fi
+  rm -f "$temp_file"
+  printf 'Renamed the managed cx PATH block to cxt in %s\n' "$rc_file"
+}
+
+remove_managed_link() {
+  local destination="$1"
+  local source="$2"
+  local link_name="$3"
+
+  if [ -L "$destination" ] && [ "$(readlink "$destination")" = "$source" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      printf 'Would remove managed %s link %s\n' "$link_name" "$destination"
+    else
+      rm "$destination" || die "could not remove managed link: $destination"
+      printf 'Removed managed %s link %s\n' "$link_name" "$destination"
+    fi
+  elif [ -e "$destination" ] || [ -L "$destination" ]; then
+    printf 'Left non-managed path unchanged: %s\n' "$destination" >&2
+  else
+    printf 'Managed %s link is already absent: %s\n' "$link_name" "$destination"
+  fi
+}
+
+migrate_legacy_link() {
+  if [ -L "$LEGACY_DESTINATION" ] && [ "$(readlink "$LEGACY_DESTINATION")" = "$LEGACY_SOURCE" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      printf 'Would remove managed legacy cx link %s\n' "$LEGACY_DESTINATION"
+    else
+      rm "$LEGACY_DESTINATION" || die "could not remove legacy cx link: $LEGACY_DESTINATION"
+      printf 'Removed managed legacy cx link %s\n' "$LEGACY_DESTINATION"
+    fi
+  elif [ -e "$LEGACY_DESTINATION" ] || [ -L "$LEGACY_DESTINATION" ]; then
+    printf 'Left non-managed legacy cx path unchanged: %s\n' "$LEGACY_DESTINATION" >&2
+  fi
 }
 
 SHELL_MODE=auto
@@ -206,27 +295,19 @@ fi
 
 SCRIPT_PATH="$(resolve_script_path)" || die 'could not resolve the installer location'
 SCRIPT_DIR="${SCRIPT_PATH%/*}"
-SOURCE="$SCRIPT_DIR/bin/cx"
+SOURCE="$SCRIPT_DIR/bin/cxt"
 BIN_DIR="$HOME/.local/bin"
-DESTINATION="$BIN_DIR/cx"
+DESTINATION="$BIN_DIR/cxt"
+LEGACY_SOURCE="${SCRIPT_DIR%/*}/cx/bin/cx"
+LEGACY_DESTINATION="$BIN_DIR/cx"
 
-[ -f "$SOURCE" ] || die "cx executable not found: $SOURCE"
+[ -f "$SOURCE" ] || die "cxt executable not found: $SOURCE"
 
 if [ "$UNINSTALL" -eq 1 ]; then
-  remove_marker_blocks "$RC_FILE"
-
-  if [ -L "$DESTINATION" ] && [ "$(readlink "$DESTINATION")" = "$SOURCE" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      printf 'Would remove managed link %s\n' "$DESTINATION"
-    else
-      rm "$DESTINATION" || die "could not remove managed link: $DESTINATION"
-      printf 'Removed managed link %s\n' "$DESTINATION"
-    fi
-  elif [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; then
-    printf 'Left non-managed path unchanged: %s\n' "$DESTINATION" >&2
-  else
-    printf 'Managed cx link is already absent: %s\n' "$DESTINATION"
-  fi
+  remove_marker_blocks "$RC_FILE" "$MARKER_BEGIN" "$MARKER_END" cxt
+  remove_marker_blocks "$RC_FILE" "$LEGACY_MARKER_BEGIN" "$LEGACY_MARKER_END" cx
+  remove_managed_link "$DESTINATION" "$SOURCE" cxt
+  remove_managed_link "$LEGACY_DESTINATION" "$LEGACY_SOURCE" cx
 
   printf 'Uninstall complete. Existing PATH settings outside the managed block were not changed.\n'
   exit 0
@@ -252,7 +333,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
 else
   mkdir -p "$BIN_DIR" || die "could not create directory: $BIN_DIR"
-  chmod +x "$SOURCE" || die "could not make cx executable: $SOURCE"
+  chmod +x "$SOURCE" || die "could not make cxt executable: $SOURCE"
   if [ -L "$DESTINATION" ]; then
     printf 'Managed link is already correct: %s -> %s\n' "$DESTINATION" "$SOURCE"
   else
@@ -261,6 +342,9 @@ else
   fi
 fi
 
+migrate_legacy_link
+migrate_legacy_marker_block "$RC_FILE"
+
 marker_state "$RC_FILE"
 marker_status=$?
 case "$marker_status" in
@@ -268,7 +352,7 @@ case "$marker_status" in
     printf 'Managed PATH block is already present in %s\n' "$RC_FILE"
     ;;
   2)
-    die "found a malformed cx marker block in $RC_FILE; remove or repair it manually"
+    die "found a malformed cxt marker block in $RC_FILE; remove or repair it manually"
     ;;
   *)
     if path_has_local_bin; then

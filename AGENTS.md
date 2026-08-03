@@ -2,5 +2,5 @@
 
 ## Tool-specific guidance
 
-- For any work under `linux/cx/`, read `linux/cx/AGENTS.md` and `linux/cx/MAINTENANCE.md` completely before inspecting or changing the implementation.
-- Treat `linux/cx/AGENTS.md` as the authoritative compatibility and verification contract for cx.
+- For any work under `linux/cxt/`, read `linux/cxt/AGENTS.md` and `linux/cxt/MAINTENANCE.md` completely before inspecting or changing the implementation.
+- Treat `linux/cxt/AGENTS.md` as the authoritative compatibility and verification contract for cxt.

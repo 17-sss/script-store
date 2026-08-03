@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | Linux | **agent-heartbeat** | Claude, Codex 같은 터미널 에이전트에 cron으로 주기적인 메시지를 보낼 때 | [상세 문서](linux/agent-heartbeat/README.md) |
 | Linux | **codex-session-manager** | 로컬 Codex 세션을 TUI에서 찾고 보관·복구·격리할 때 | [상세 문서](linux/codex-session-manager/README.md) |
-| Linux | **cx** | 현재 프로젝트 전용 tmux 세션에서 Codex를 빠르게 실행할 때 | [상세 문서](linux/cx/README.md) |
+| Linux | **cxt** | 현재 프로젝트 전용 tmux 세션에서 Codex를 빠르게 실행할 때 | [상세 문서](linux/cxt/README.md) |
 | Linux / macOS | **OMX Guard** | Oh My Codex 설정을 백업하고 안전하게 제거·복구할 때 | [상세 문서](linux/omx-guard/README.md) |
 | Windows | **devtunnel** | 원격 개발 서버의 포트를 SSH 터널로 Windows localhost에 연결할 때 | [상세 문서](windows/devtunnel/README.md) |
 | Windows + WSL | **wsl-portproxy** | WSL 개발 서버를 Windows 또는 LAN에 노출하거나 기존 규칙을 정리할 때 | [상세 문서](windows/wsl-portproxy/README.md) |
@@ -22,7 +22,7 @@ script-store/
 ├── linux/
 │   ├── agent-heartbeat/       # 에이전트 주기 메시지 전송
 │   ├── codex-session-manager/ # Codex 로컬 세션 관리 TUI
-│   ├── cx/                    # Codex tmux 실행 명령
+│   ├── cxt/                    # Codex tmux 실행 명령
 │   └── omx-guard/             # OMX 백업·제거·복구
 ├── windows/
 │   ├── devtunnel/             # SSH 로컬 포트 포워딩 도우미
@@ -88,18 +88,18 @@ cd linux/agent-heartbeat
 
 Node.js와 `PATH`에서 실행 가능한 Codex CLI가 필요하며 `fzf`나 npm 설치는 필요하지 않습니다. 단축키와 격리 복구 절차는 [codex-session-manager README](linux/codex-session-manager/README.md)에 정리되어 있습니다.
 
-### cx
+### cxt
 
 현재 디렉터리 이름을 기준으로 새 tmux 세션을 만들고 Codex를 실행하는 Bash/Zsh 공용 명령입니다. tmux가 없으면 현재 터미널에서 Codex를 직접 실행합니다.
 
 ```bash
-./linux/cx/install-cx.sh
+./linux/cxt/install-cxt.sh
 source ~/.zshrc
 
-cx
-cx --xhigh
-cx --madmax
-cx resume --last
+cxt
+cxt --xhigh
+cxt --madmax
+cxt resume --last
 ```
 
 - 모든 실행에 `--no-alt-screen`을 기본 적용합니다.
@@ -109,11 +109,11 @@ cx resume --last
 
 | 파일 | 역할 |
 | --- | --- |
-| `bin/cx` | tmux 세션을 만들고 인자를 변환해 Codex를 실행하는 본체 |
-| `install-cx.sh` | `~/.local/bin/cx` 심볼릭 링크와 필요한 PATH marker를 설치·제거 |
-| `tests/test-cx.sh` | mock Codex/tmux와 임시 HOME으로 실행·설치 동작을 검증 |
+| `bin/cxt` | tmux 세션을 만들고 인자를 변환해 Codex를 실행하는 본체 |
+| `install-cxt.sh` | `~/.local/bin/cxt` 심볼릭 링크와 필요한 PATH marker를 설치·제거 |
+| `tests/test-cxt.sh` | mock Codex/tmux와 임시 HOME으로 실행·설치 동작을 검증 |
 
-Codex CLI가 필수이며 tmux는 선택 사항입니다. 설치 옵션과 정확한 인자 전달 규칙은 [cx README](linux/cx/README.md)를 참고하세요.
+Codex CLI가 필수이며 tmux는 선택 사항입니다. 설치 옵션과 정확한 인자 전달 규칙은 [cxt README](linux/cxt/README.md)를 참고하세요.
 
 ### OMX Guard
 
@@ -201,7 +201,7 @@ Linux 도구는 각 폴더의 스모크 테스트를 직접 실행할 수 있습
 ```bash
 ./linux/agent-heartbeat/smoke-test.sh
 ./linux/codex-session-manager/smoke-test.sh
-./linux/cx/tests/test-cx.sh
+./linux/cxt/tests/test-cxt.sh
 ./linux/omx-guard/smoke-test.sh
 ```
 
