@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-# Run Codex in a project-specific tmux session.
+# Run Codex in a project-specific tmux session and manage cx sessions.
+
+CX_SESSION_PREFIX='codex-'
 
 print_cx_help() {
   cat <<'EOF'
@@ -25,12 +27,199 @@ cx shortcuts:
     --full-auto  workspace-write + no approval prompts
     --madmax     --yolo (no sandbox or approval prompts)
 
+  Session management:
+    --attach, --at [SESSION]       Attach/switch to the newest cx session
+    --kill-session, --ks [SESSION] Kill the current or newest cx session
+    --kill-all, --ka               Kill all cx sessions
+
   Other:
     --cx-help    Show this help
     --           Stop interpreting cx shortcuts
 
 All other options are passed to Codex unchanged.
 EOF
+}
+
+add_session_action() {
+  local action="$1"
+  local shortcut="$2"
+
+  if [ -n "$session_action" ]; then
+    shortcut_conflict 'session management' "$session_shortcut" "$shortcut"
+  fi
+  session_action="$action"
+  session_shortcut="$shortcut"
+}
+
+set_session_target() {
+  local target="$1"
+
+  if [ -z "$target" ]; then
+    printf 'cx: %s requires a non-empty session name after =\n' "$session_shortcut" >&2
+    exit 2
+  fi
+  session_target="$target"
+}
+
+validate_cx_session_name() {
+  local target="$1"
+  local suffix
+
+  case "$target" in
+    "$CX_SESSION_PREFIX"*) ;;
+    *)
+      printf 'cx: not a cx tmux session: %s\n' "$target" >&2
+      return 2
+      ;;
+  esac
+
+  suffix="${target#"$CX_SESSION_PREFIX"}"
+  case "$suffix" in
+    ''|*[!A-Za-z0-9_-]*)
+      printf 'cx: not a valid cx tmux session name: %s\n' "$target" >&2
+      return 2
+      ;;
+  esac
+}
+
+cx_session_rows() {
+  local rows
+
+  rows="$(tmux list-sessions -F '#{session_created}:#{session_name}' 2>/dev/null)" || rows=
+  printf '%s\n' "$rows"
+}
+
+cx_session_exists() {
+  local target="$1"
+  local created candidate
+
+  while IFS=: read -r created candidate; do
+    [ "$candidate" = "$target" ] && return 0
+  done <<EOF
+$(cx_session_rows)
+EOF
+  return 1
+}
+
+latest_cx_session() {
+  local created candidate
+  local latest_created=-1
+  local latest_session=
+
+  while IFS=: read -r created candidate; do
+    case "$candidate" in
+      "$CX_SESSION_PREFIX"*) ;;
+      *) continue ;;
+    esac
+    case "$created" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$created" -ge "$latest_created" ]; then
+      latest_created="$created"
+      latest_session="$candidate"
+    fi
+  done <<EOF
+$(cx_session_rows)
+EOF
+
+  [ -n "$latest_session" ] || return 1
+  printf '%s\n' "$latest_session"
+}
+
+current_cx_session() {
+  local current_session
+
+  [ -n "${TMUX:-}" ] || return 1
+  current_session="$(tmux display-message -p '#{session_name}' 2>/dev/null)" || return 1
+  validate_cx_session_name "$current_session" >/dev/null 2>&1 || return 1
+  cx_session_exists "$current_session" || return 1
+  printf '%s\n' "$current_session"
+}
+
+resolve_cx_session() {
+  local prefer_current="$1"
+  local resolved_session
+
+  if [ -n "$session_target" ]; then
+    validate_cx_session_name "$session_target" || return $?
+    if ! cx_session_exists "$session_target"; then
+      printf 'cx: cx tmux session not found: %s\n' "$session_target" >&2
+      return 1
+    fi
+    printf '%s\n' "$session_target"
+    return 0
+  fi
+
+  if [ "$prefer_current" -eq 1 ]; then
+    resolved_session="$(current_cx_session)" && {
+      printf '%s\n' "$resolved_session"
+      return 0
+    }
+  fi
+
+  resolved_session="$(latest_cx_session)" || {
+    printf 'cx: no cx tmux sessions found\n' >&2
+    return 1
+  }
+  printf '%s\n' "$resolved_session"
+}
+
+run_session_action() {
+  local target current_session
+  local sessions=()
+  local created candidate
+  local failed=0
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf 'cx: tmux command not found\n' >&2
+    exit 127
+  fi
+
+  case "$session_action" in
+    attach)
+      target="$(resolve_cx_session 0)" || exit $?
+      if [ -n "${TMUX:-}" ]; then
+        exec tmux switch-client -t "$target"
+      fi
+      exec tmux attach-session -t "$target"
+      ;;
+    kill-one)
+      target="$(resolve_cx_session 1)" || exit $?
+      exec tmux kill-session -t "$target"
+      ;;
+    kill-all)
+      while IFS=: read -r created candidate; do
+        case "$candidate" in
+          "$CX_SESSION_PREFIX"*) sessions+=("$candidate") ;;
+        esac
+      done <<EOF
+$(cx_session_rows)
+EOF
+
+      if [ "${#sessions[@]}" -eq 0 ]; then
+        printf 'cx: no cx tmux sessions found\n' >&2
+        exit 1
+      fi
+
+      current_session=
+      if [ -n "${TMUX:-}" ]; then
+        current_session="$(tmux display-message -p '#{session_name}' 2>/dev/null)" || current_session=
+      fi
+
+      for candidate in "${sessions[@]}"; do
+        [ "$candidate" = "$current_session" ] && continue
+        tmux kill-session -t "$candidate" || failed=1
+      done
+      if [ -n "$current_session" ]; then
+        for candidate in "${sessions[@]}"; do
+          if [ "$candidate" = "$current_session" ]; then
+            exec tmux kill-session -t "$current_session"
+          fi
+        done
+      fi
+      exit "$failed"
+      ;;
+  esac
 }
 
 shortcut_conflict() {
@@ -87,23 +276,23 @@ add_permission_shortcut() {
   esac
 }
 
-session_directory="${PWD##*/}"
-if [ -z "$session_directory" ]; then
-  session_directory="/"
-fi
-
-session="codex-${session_directory}-$(date +%H%M%S)"
-session="${session//[^A-Za-z0-9_-]/-}"
-
 codex_args=(--no-alt-screen)
 passthrough=0
 model_shortcut=
 reasoning_shortcut=
 permission_shortcut=
+session_action=
+session_shortcut=
+session_target=
+codex_input_seen=0
 
-for arg in "$@"; do
+while [ "$#" -gt 0 ]; do
+  arg="$1"
+  shift
+
   if [ "$passthrough" -eq 1 ]; then
     codex_args+=("$arg")
+    codex_input_seen=1
     continue
   fi
 
@@ -115,39 +304,93 @@ for arg in "$@"; do
     --)
       passthrough=1
       codex_args+=("$arg")
+      codex_input_seen=1
+      ;;
+    --attach|--at)
+      add_session_action attach "$arg"
+      if [ "$#" -gt 0 ]; then
+        case "$1" in
+          -*) ;;
+          *)
+            set_session_target "$1"
+            shift
+            ;;
+        esac
+      fi
+      ;;
+    --attach=*|--at=*)
+      add_session_action attach "${arg%%=*}"
+      set_session_target "${arg#*=}"
+      ;;
+    --kill-session|--ks)
+      add_session_action kill-one "$arg"
+      if [ "$#" -gt 0 ]; then
+        case "$1" in
+          -*) ;;
+          *)
+            set_session_target "$1"
+            shift
+            ;;
+        esac
+      fi
+      ;;
+    --kill-session=*|--ks=*)
+      add_session_action kill-one "${arg%%=*}"
+      set_session_target "${arg#*=}"
+      ;;
+    --kill-all|--ka)
+      add_session_action kill-all "$arg"
       ;;
     --sol)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.6-sol
       ;;
     --terra)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.6-terra
       ;;
     --luna)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.6-luna
       ;;
     --gpt55)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.5
       ;;
     --gpt54)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.4
       ;;
     --mini)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.4-mini
       ;;
     --spark)
+      codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.3-codex-spark
       ;;
     --low|--medium|--high|--xhigh|--max|--ultra)
+      codex_input_seen=1
       add_reasoning_shortcut "$arg" "${arg#--}"
       ;;
     --safe|--auto|--full-auto|--madmax)
+      codex_input_seen=1
       add_permission_shortcut "$arg"
       ;;
     *)
+      codex_input_seen=1
       codex_args+=("$arg")
       ;;
   esac
 done
+
+if [ -n "$session_action" ]; then
+  if [ "$codex_input_seen" -eq 1 ]; then
+    printf 'cx: session management options cannot be combined with Codex arguments\n' >&2
+    exit 2
+  fi
+  run_session_action
+fi
 
 if ! command -v codex >/dev/null 2>&1; then
   printf 'cx: codex command not found\n' >&2
@@ -158,6 +401,14 @@ if ! command -v tmux >/dev/null 2>&1; then
   printf 'cx: tmux not found; launching Codex directly\n' >&2
   exec codex "${codex_args[@]}"
 fi
+
+session_directory="${PWD##*/}"
+if [ -z "$session_directory" ]; then
+  session_directory="/"
+fi
+
+session="${CX_SESSION_PREFIX}${session_directory}-$(date +%H%M%S)"
+session="${session//[^A-Za-z0-9_-]/-}"
 
 if ! tmux new-session \
   -d \

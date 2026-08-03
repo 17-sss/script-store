@@ -95,6 +95,20 @@ printf '%s\n' "$call_number" > "$CX_TMUX_COUNT"
 for mock_arg in "$@"; do
   printf '%s\0' "$mock_arg" >> "$CX_TMUX_LOG.$call_number"
 done
+
+case "${1:-}" in
+  list-sessions)
+    if [ -r "${CX_TMUX_SESSIONS:-}" ]; then
+      while IFS= read -r mock_session || [ -n "$mock_session" ]; do
+        printf '%s\n' "$mock_session"
+      done < "$CX_TMUX_SESSIONS"
+    fi
+    ;;
+  display-message)
+    printf '%s\n' "${CX_TMUX_CURRENT_SESSION:-}"
+    ;;
+esac
+
 exit 0
 EOF
   chmod +x "$bin_dir/tmux"
@@ -154,6 +168,9 @@ fi
 assert_file_contains "$TMP_ROOT/cx-help" 'Usage: cx [CX_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
 assert_file_contains "$TMP_ROOT/cx-help" '--sol       --model gpt-5.6-sol'
 assert_file_contains "$TMP_ROOT/cx-help" '--safe       read-only + untrusted approvals'
+assert_file_contains "$TMP_ROOT/cx-help" '--attach, --at [SESSION]'
+assert_file_contains "$TMP_ROOT/cx-help" '--kill-session, --ks [SESSION]'
+assert_file_contains "$TMP_ROOT/cx-help" '--kill-all, --ka'
 
 run_direct_case empty
 assert_args "$DIRECT_LOG" --no-alt-screen
@@ -211,8 +228,8 @@ assert_args "$DIRECT_LOG" \
 run_direct_case prompt --xhigh '현재 프로젝트의 테스트를 수정해줘'
 assert_args "$DIRECT_LOG" --no-alt-screen -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
 
-run_direct_case passthrough -- --sol --high --auto --madmax
-assert_args "$DIRECT_LOG" --no-alt-screen -- --sol --high --auto --madmax
+run_direct_case passthrough -- --sol --high --auto --madmax --at --ks --ka
+assert_args "$DIRECT_LOG" --no-alt-screen -- --sol --high --auto --madmax --at --ks --ka
 
 run_direct_case native --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
 assert_args "$DIRECT_LOG" --no-alt-screen --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
@@ -252,6 +269,165 @@ set -e
 [ "$missing_status" -eq 127 ] || fail "missing codex returned $missing_status instead of 127"
 assert_file_contains "$missing_root/stderr" 'cx: codex command not found'
 
+# Session management tests use only the mock tmux state below. They do not
+# inspect or mutate the tmux server that launched this test process.
+session_root="$TMP_ROOT/session-management"
+mkdir -p "$session_root/project"
+make_minimal_bin "$session_root/bin"
+make_tmux_mock "$session_root/bin"
+printf '%s\n' \
+  '400:work' \
+  '100:codex-project-old' \
+  '300:codex-project-new' > "$session_root/sessions"
+
+(
+  unset TMUX
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    "$CX" --at
+)
+assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
+assert_args "$session_root/tmux.args.2" attach-session -t codex-project-new
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+(
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    TMUX='/tmp/mock-tmux,1,0' \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    "$CX" --attach codex-project-old
+)
+assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
+assert_args "$session_root/tmux.args.2" switch-client -t codex-project-old
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+(
+  unset TMUX
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    "$CX" --ks
+)
+assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
+assert_args "$session_root/tmux.args.2" kill-session -t codex-project-new
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+(
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    TMUX='/tmp/mock-tmux,1,0' \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    CX_TMUX_CURRENT_SESSION=codex-project-old \
+    "$CX" --kill-session
+)
+assert_args "$session_root/tmux.args.1" display-message -p '#{session_name}'
+assert_args "$session_root/tmux.args.2" list-sessions -F '#{session_created}:#{session_name}'
+assert_args "$session_root/tmux.args.3" kill-session -t codex-project-old
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+(
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    TMUX='/tmp/mock-tmux,1,0' \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    CX_TMUX_CURRENT_SESSION=codex-project-old \
+    "$CX" --ka
+)
+assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
+assert_args "$session_root/tmux.args.2" display-message -p '#{session_name}'
+assert_args "$session_root/tmux.args.3" kill-session -t codex-project-new
+assert_args "$session_root/tmux.args.4" kill-session -t codex-project-old
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+set +e
+(
+  unset TMUX
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    "$CX" --at work
+) 2> "$session_root/non-cx.stderr"
+non_cx_status=$?
+set -e
+[ "$non_cx_status" -eq 2 ] || fail "non-cx attach returned $non_cx_status instead of 2"
+assert_file_contains "$session_root/non-cx.stderr" 'cx: not a cx tmux session: work'
+[ ! -e "$session_root/tmux.count" ] || fail 'non-cx attach called tmux'
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+printf '%s\n' '400:work' > "$session_root/no-cx-sessions"
+set +e
+(
+  unset TMUX
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/no-cx-sessions" \
+    "$CX" --attach
+) 2> "$session_root/no-cx.stderr"
+no_cx_status=$?
+set -e
+[ "$no_cx_status" -eq 1 ] || fail "empty cx attach returned $no_cx_status instead of 1"
+assert_file_contains "$session_root/no-cx.stderr" 'cx: no cx tmux sessions found'
+assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{session_name}'
+
+rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
+set +e
+(
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    "$CX" --at --kill-all
+) 2> "$session_root/action-conflict.stderr"
+action_conflict_status=$?
+set -e
+[ "$action_conflict_status" -eq 2 ] || fail "session action conflict returned $action_conflict_status instead of 2"
+assert_file_contains "$session_root/action-conflict.stderr" 'cx: session management shortcuts cannot be combined'
+[ ! -e "$session_root/tmux.count" ] || fail 'session action conflict called tmux'
+
+set +e
+(
+  cd "$session_root/project"
+  PATH="$session_root/bin" \
+    CX_TMUX_COUNT="$session_root/tmux.count" \
+    CX_TMUX_LOG="$session_root/tmux.args" \
+    CX_TMUX_SESSIONS="$session_root/sessions" \
+    "$CX" --attach --safe
+) 2> "$session_root/action-codex-conflict.stderr"
+action_codex_status=$?
+set -e
+[ "$action_codex_status" -eq 2 ] || fail "session/Codex conflict returned $action_codex_status instead of 2"
+assert_file_contains "$session_root/action-codex-conflict.stderr" 'cx: session management options cannot be combined with Codex arguments'
+[ ! -e "$session_root/tmux.count" ] || fail 'session/Codex conflict called tmux'
+
+missing_tmux_root="$TMP_ROOT/missing-tmux-management"
+mkdir -p "$missing_tmux_root/project"
+make_minimal_bin "$missing_tmux_root/bin"
+set +e
+(
+  cd "$missing_tmux_root/project"
+  PATH="$missing_tmux_root/bin" "$CX" --ka
+) 2> "$missing_tmux_root/stderr"
+missing_tmux_status=$?
+set -e
+[ "$missing_tmux_status" -eq 127 ] || fail "missing tmux management returned $missing_tmux_status instead of 127"
+assert_file_contains "$missing_tmux_root/stderr" 'cx: tmux command not found'
+
 tmux_root="$TMP_ROOT/tmux"
 tmux_project="$tmux_root/Project name+demo"
 mkdir -p "$tmux_project"
@@ -259,6 +435,7 @@ make_minimal_bin "$tmux_root/bin"
 make_codex_mock "$tmux_root/bin"
 make_tmux_mock "$tmux_root/bin"
 (
+  unset TMUX
   cd "$tmux_project"
   PATH="$tmux_root/bin" \
     CX_TMUX_COUNT="$tmux_root/tmux.count" \

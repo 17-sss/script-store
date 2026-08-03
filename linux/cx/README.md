@@ -37,6 +37,8 @@ cx --terra --medium --safe
 cx --luna --max --full-auto
 cx --sol --ultra --madmax
 cx resume --last
+cx --at
+cx --ks
 ```
 
 - 모든 실행에는 `--no-alt-screen`이 기본으로 추가됩니다.
@@ -46,6 +48,26 @@ cx resume --last
 - tmux 안에서는 nested attach 대신 새 세션으로 client를 전환합니다.
 
 세션 이름은 `codex-<현재 디렉터리>-<HHMMSS>` 형식이며 영문자, 숫자, `_`, `-` 이외의 문자는 `-`로 바뀝니다.
+
+## tmux 세션 관리
+
+`cx`가 예약한 `codex-` 접두사의 tmux 세션만 다시 연결하거나 종료할 수 있습니다. 관리 옵션은 Codex 실행 옵션이나 프롬프트와 조합하지 않습니다.
+
+| 동작 | 긴 옵션 | 짧은 옵션 | 대상을 생략했을 때 |
+| --- | --- | --- | --- |
+| 다시 연결 | `--attach` | `--at` | 가장 최근 cx 세션 |
+| 하나 종료 | `--kill-session` | `--ks` | 현재 cx 세션, 없으면 가장 최근 cx 세션 |
+| 모두 종료 | `--kill-all` | `--ka` | 모든 cx 세션 |
+
+```bash
+cx --at
+cx --attach codex-my-project-142530
+cx --ks
+cx --kill-session codex-my-project-142530
+cx --ka
+```
+
+tmux 안에서 attach를 실행하면 nested attach 대신 해당 cx 세션으로 client를 전환합니다. 세션 이름을 직접 지정할 때는 정확한 `codex-...` 이름만 허용하며, 일반 tmux 세션은 attach나 종료 대상이 되지 않습니다. `--ka`는 현재 cx 세션을 마지막에 종료하므로 cx 안에서도 다른 cx 세션을 먼저 모두 닫을 수 있습니다.
 
 ## 편의 옵션
 
