@@ -461,6 +461,18 @@ quarantined_path() {
   printf '%s\n' "$found"
 }
 
+quarantine_batch_dir() {
+  local source="$1"
+  local stored relative batch
+  stored="$(quarantined_path "$source")"
+  relative="${stored#"$QUARANTINE_ROOT"/}"
+  batch="${relative%%/*}"
+  if [[ -z "$batch" || "$batch" == "$relative" ]]; then
+    fail "could not derive quarantine batch for $source"
+  fi
+  printf '%s/%s\n' "$QUARANTINE_ROOT" "$batch"
+}
+
 assert_not_quarantined() {
   local source="$1"
   if [[ -d "$QUARANTINE_ROOT" ]] && find "$QUARANTINE_ROOT" -type f -name "$(basename -- "$source")" -print -quit | grep -q .; then
@@ -715,11 +727,33 @@ run_tui "\t/case S restore archived success\ndQUARANTINE $uuid_ba\nq" "$TMP_DIR/
 assert_no_fake_calls
 assert_quarantined_file "$restore_archived_file" "$uuid_ba"
 
+malformed_batch="$QUARANTINE_ROOT/malformed-review-fixture"
+mkdir -p "$malformed_batch"
+printf '{"broken":\n' > "$malformed_batch/manifest.json"
+
+root_error_quarantine="$TMP_DIR/quarantine-root-is-a-file"
+printf 'not a directory\n' > "$root_error_quarantine"
+root_error_json="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --quarantine-dir "$root_error_quarantine" --list quarantine --json)"
+JSON_INPUT="$root_error_json" ROOT_PATH="$root_error_quarantine" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+const diagnostic = (data.quarantine || []).find((entry) => entry.inventoryDiagnostic);
+if (!diagnostic || diagnostic.file !== process.env.ROOT_PATH || !/quarantine root could not be read/i.test(diagnostic.unsafeReason || '')) {
+  throw new Error(`missing quarantine root diagnostic: ${JSON.stringify(data, null, 2)}`);
+}
+NODE
+
 quarantine_json="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list quarantine --json)"
 assert_json_entry "$quarantine_json" "case S restore active success" \
   "entry.state === 'quarantine' && entry.restoreState === 'active' && entry.originalPath === '$restore_success_file' && entry.mutationSafe === true"
 assert_json_entry "$quarantine_json" "case S restore archived success" \
   "entry.state === 'quarantine' && entry.restoreState === 'archived' && entry.originalPath === '$restore_archived_file' && entry.mutationSafe === true"
+JSON_INPUT="$quarantine_json" MANIFEST_PATH="$malformed_batch/manifest.json" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+const diagnostic = (data.quarantine || []).find((entry) => entry.manifestPath === process.env.MANIFEST_PATH);
+if (!diagnostic || !diagnostic.inventoryDiagnostic || diagnostic.mutationSafe || !/manifest could not be read/i.test(diagnostic.unsafeReason || '')) {
+  throw new Error(`missing malformed manifest diagnostic: ${JSON.stringify(data, null, 2)}`);
+}
+NODE
 
 all_with_quarantine_json="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all --json)"
 JSON_INPUT="$all_with_quarantine_json" node <<'NODE'
@@ -744,6 +778,13 @@ assert_quarantined_file "$restore_multi_two_file" "$uuid_aw"
 run_tui "\t\t/case S restore wrong confirmation\nuWRONG\nq" "$TMP_DIR/restore-wrong-confirmation.log"
 assert_contains "$(clean_log "$TMP_DIR/restore-wrong-confirmation.log")" "Restore cancelled"
 assert_quarantined_file "$restore_wrong_file" "$uuid_au"
+
+restore_lock_batch="$(quarantine_batch_dir "$restore_multi_one_file")"
+printf '{"fixture":"active restore"}\n' > "$restore_lock_batch/.restore.lock"
+run_tui "\t\t/case S restore multi one\nuRESTORE $uuid_av\nq" "$TMP_DIR/restore-batch-lock.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-batch-lock.log")" "another CSM restore is active for this quarantine batch"
+assert_quarantined_file "$restore_multi_one_file" "$uuid_av"
+rm -f -- "$restore_lock_batch/.restore.lock"
 
 printf 'collision fixture\n' > "$restore_collision_file"
 run_tui "\t\t/case S restore target collision\nu\nq" "$TMP_DIR/restore-target-collision.log"
@@ -774,6 +815,9 @@ assert_contains "$(clean_log "$TMP_DIR/restore-active-success.log")" "Restored $
 [[ -e "$restore_success_file" ]] || fail 'active quarantine restore did not recreate the original path'
 [[ "$(sha256sum "$restore_success_file")" == "$restore_success_digest" ]] || fail 'active quarantine restore modified transcript contents'
 assert_not_quarantined "$restore_success_file"
+if find "$QUARANTINE_ROOT" -type f -name '.restore.lock' -print -quit | grep -q .; then
+  fail 'successful restore left a batch lock behind'
+fi
 
 run_tui "\t\t/case S restore archived success\nuRESTORE $uuid_ba\nq" "$TMP_DIR/restore-archived-success.log"
 assert_no_fake_calls

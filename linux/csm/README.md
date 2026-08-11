@@ -148,7 +148,7 @@ QUARANTINE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 ### 격리 목록과 복원
 
-일반 모드에서 `Tab`을 두 번 누르면 `quarantine` 화면으로 이동합니다. 이 화면은 완료된 CSM quarantine batch의 `manifest.json`과 실제 보관 JSONL을 함께 검증해 목록을 만듭니다. 격리 당시 active였는지 archived였는지와 원래 경로도 상세 영역에서 확인할 수 있습니다.
+일반 모드에서 `Tab`을 두 번 누르면 `quarantine` 화면으로 이동합니다. 이 화면은 완료된 CSM quarantine batch의 `manifest.json`과 실제 보관 JSONL을 함께 검증해 목록을 만듭니다. 격리 당시 active였는지 archived였는지와 원래 경로도 상세 영역에서 확인할 수 있습니다. quarantine root를 읽을 수 없거나 incomplete/symlink batch 또는 손상된 manifest가 있으면 빈 목록으로 숨기지 않고 복원 불가 diagnostic 항목으로 표시합니다.
 
 복원할 세션 하나에 커서를 두고 `u`를 누른 뒤 다음 정확한 문자열을 입력합니다.
 
@@ -158,7 +158,7 @@ RESTORE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 복원은 manifest에 기록된 active 또는 archived 원래 경로로 해당 JSONL만 이동합니다. transcript 내용은 수정하지 않으며, 기존 파일이나 심볼릭 링크가 원래 경로에 있으면 덮어쓰지 않고 차단합니다. 여러 세션을 선택한 복원도 차단합니다.
 
-확인 전과 확인 직후에 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 경로나 identity가 바뀌면 아무 파일도 이동하지 않습니다. 성공하면 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
+확인 전과 확인 직후에 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 경로나 identity가 바뀌면 아무 파일도 이동하지 않습니다. 최종 재검증부터 파일 이동과 manifest 갱신이 끝날 때까지 batch별 `.restore.lock`을 배타적으로 유지하므로, 같은 batch의 동시 복원이 서로의 manifest 갱신을 덮어쓰지 않습니다. 성공하면 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
 
 격리 없이 영구 삭제하려면 처음부터 `--force`로 TUI를 실행합니다.
 

@@ -448,7 +448,8 @@ async function restoreQuarantinedSelected(state) {
     const result = restoreQuarantinedEntry(state.options, checked.entry);
     state.selected.clear();
     refresh(state);
-    state.status = `Restored ${result.entry.canonicalId} to ${result.entry.restoreState}`;
+    const warning = result.lockCleanupWarning ? `; warning: ${sanitizeTerminalText(result.lockCleanupWarning)}` : '';
+    state.status = `Restored ${result.entry.canonicalId} to ${result.entry.restoreState}${warning}`;
   } catch (error) {
     refresh(state);
     state.status = `Restore failed: ${sanitizeTerminalText(error.message)}`;
@@ -900,6 +901,15 @@ function restoreTargetParentBlockReason(entry, options) {
 }
 
 function restoreQuarantinedEntry(options, original) {
+  const referenceReason = quarantineEntryReferenceReason(original, options);
+  if (referenceReason) {
+    throw new Error(referenceReason);
+  }
+
+  return withQuarantineBatchLock(original.batchDir, () => restoreQuarantinedEntryLocked(options, original));
+}
+
+function restoreQuarantinedEntryLocked(options, original) {
   const checked = revalidateQuarantineEntry(original, options);
   if (!checked.ok) {
     throw new Error(checked.reason);
@@ -937,6 +947,69 @@ function restoreQuarantinedEntry(options, original) {
   }
 
   return {entry, manifest: updatedManifest};
+}
+
+function withQuarantineBatchLock(batchDir, operation) {
+  const lockPath = path.join(batchDir, '.restore.lock');
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      lockPath,
+      fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        (fs.constants.O_NOFOLLOW || 0),
+      0o600,
+    );
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      throw new Error(`another CSM restore is active for this quarantine batch: ${lockPath}`);
+    }
+    throw error;
+  }
+
+  const lockIdentity = fs.fstatSync(descriptor);
+  let result;
+  let operationError;
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify({pid: process.pid, createdAt: new Date().toISOString()})}\n`, 'utf8');
+    result = operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  const cleanupError = releaseQuarantineBatchLock(descriptor, lockPath, lockIdentity);
+  if (operationError) {
+    if (cleanupError) {
+      operationError.message = `${operationError.message}; batch lock cleanup failed: ${cleanupError}`;
+    }
+    throw operationError;
+  }
+  if (cleanupError) {
+    result.lockCleanupWarning = cleanupError;
+  }
+  return result;
+}
+
+function releaseQuarantineBatchLock(descriptor, lockPath, lockIdentity) {
+  const errors = [];
+  try {
+    fs.closeSync(descriptor);
+  } catch (error) {
+    errors.push(`could not close ${lockPath}: ${sanitizeTerminalText(error.message)}`);
+  }
+
+  try {
+    const current = fs.lstatSync(lockPath);
+    if (String(current.dev) !== String(lockIdentity.dev) || String(current.ino) !== String(lockIdentity.ino)) {
+      errors.push(`lock path identity changed: ${lockPath}`);
+    } else {
+      fs.unlinkSync(lockPath);
+    }
+  } catch (error) {
+    errors.push(`could not remove ${lockPath}: ${sanitizeTerminalText(error.message)}`);
+  }
+  return errors.join('; ');
 }
 
 async function permanentlyDeleteBatch(state, entries) {
@@ -1540,7 +1613,11 @@ function render(state) {
     const safety = selected.mutationSafe ? 'safe' : `blocked: ${selected.unsafeReason}`;
     lines.push(truncate(`id: ${selected.id}  safety: ${safety}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
     lines.push(truncate(`cwd: ${selected.cwd || '(unknown)'}`, width));
-    if (state.view === 'quarantine') {
+    if (state.view === 'quarantine' && selected.inventoryDiagnostic) {
+      lines.push(truncate(`quarantine diagnostic: ${sanitizeTerminalText(selected.file)}`, width));
+      lines.push(truncate(`reason: ${selected.unsafeReason}`, width));
+      lines.push('');
+    } else if (state.view === 'quarantine') {
       lines.push(truncate(`quarantined: ${sanitizeTerminalText(selected.file)}`, width));
       lines.push(truncate(`restore to: ${sanitizeTerminalText(selected.originalPath)}`, width));
       lines.push(truncate(`name: ${selected.title || selected.summary}`, width));
@@ -1672,7 +1749,7 @@ function currentEntries(state) {
 function applyFilters(entries, options, query = '') {
   const normalizedQuery = query.trim().toLowerCase();
   return entries.filter((entry) => {
-    if (!options.showAll && !isUnderPath(entry.cwd, options.cwd)) {
+    if (!options.showAll && !entry.inventoryDiagnostic && !isUnderPath(entry.cwd, options.cwd)) {
       return false;
     }
     if (!normalizedQuery) {
@@ -1714,19 +1791,69 @@ function loadQuarantineEntries(options, titles) {
   let batches;
   try {
     batches = fs.readdirSync(options.quarantineDir, {withFileTypes: true});
-  } catch {
-    return [];
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return [];
+    }
+    return [buildQuarantineDiagnostic({
+      file: options.quarantineDir,
+      batchDir: options.quarantineDir,
+      manifestPath: options.quarantineDir,
+      reason: `quarantine root could not be read: ${sanitizeTerminalText(error.message)}`,
+    })];
   }
 
   const entries = [];
   for (const batch of batches) {
-    if (!batch.isDirectory() || batch.name.startsWith('.partial-')) {
-      continue;
-    }
     const batchDir = path.join(options.quarantineDir, batch.name);
     const manifestPath = path.join(batchDir, 'manifest.json');
+    if (batch.name.startsWith('.partial-')) {
+      entries.push(buildQuarantineDiagnostic({
+        file: batchDir,
+        batchDir,
+        manifestPath,
+        reason: 'incomplete quarantine batch requires manual inspection',
+      }));
+      continue;
+    }
+    if (batch.isSymbolicLink()) {
+      entries.push(buildQuarantineDiagnostic({
+        file: batchDir,
+        batchDir,
+        manifestPath,
+        reason: 'quarantine batch is a symbolic link',
+      }));
+      continue;
+    }
+    if (!batch.isDirectory()) {
+      continue;
+    }
     const snapshot = readQuarantineManifest(manifestPath);
-    if (!snapshot.ok || snapshot.manifest.mode !== 'quarantine' || snapshot.manifest.status !== 'complete' || !Array.isArray(snapshot.manifest.items)) {
+    if (!snapshot.ok) {
+      entries.push(buildQuarantineDiagnostic({
+        file: manifestPath,
+        batchDir,
+        manifestPath,
+        reason: `quarantine manifest could not be read: ${snapshot.reason}`,
+      }));
+      continue;
+    }
+    if (snapshot.manifest.status === 'restored' && Array.isArray(snapshot.manifest.items) && snapshot.manifest.items.length === 0) {
+      continue;
+    }
+    if (
+      snapshot.manifest.version !== 1 ||
+      snapshot.manifest.mode !== 'quarantine' ||
+      snapshot.manifest.status !== 'complete' ||
+      !Array.isArray(snapshot.manifest.items) ||
+      snapshot.manifest.items.length === 0
+    ) {
+      entries.push(buildQuarantineDiagnostic({
+        file: manifestPath,
+        batchDir,
+        manifestPath,
+        reason: 'quarantine manifest metadata is invalid or incomplete',
+      }));
       continue;
     }
     snapshot.batchDir = batchDir;
@@ -1737,6 +1864,38 @@ function loadQuarantineEntries(options, titles) {
   }
 
   return entries.sort((left, right) => right.time - left.time || left.file.localeCompare(right.file));
+}
+
+function buildQuarantineDiagnostic({file, batchDir, manifestPath, reason}) {
+  const identity = unsafeIdentity('', '', reason);
+  const stat = safeStat(file) || safeStat(batchDir);
+  const entry = buildEntry({
+    file,
+    state: 'quarantine',
+    identity,
+    timestamp: stat ? stat.mtimeMs : 0,
+    cwd: '',
+    source: 'quarantine',
+    summary: '(quarantine diagnostic)',
+    role: '',
+    nickname: '',
+    title: '',
+  });
+  return {
+    ...entry,
+    key: `quarantine-diagnostic:${file}`,
+    state: 'quarantine',
+    mutationSafe: false,
+    unsafeReason: sanitizeTerminalText(reason),
+    inventoryDiagnostic: true,
+    manifestId: '',
+    manifestPath,
+    batchDir,
+    manifestIndex: -1,
+    storedRelativePath: '',
+    originalPath: '',
+    restoreState: '',
+  };
 }
 
 function readQuarantineManifest(manifestPath) {
