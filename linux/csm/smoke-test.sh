@@ -2,17 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+INSTALLER="$SCRIPT_DIR/install-csm.sh"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+ORIGINAL_PATH="$PATH"
 REAL_HOME="${HOME:-}"
 REAL_CODEX_HOME="${CODEX_HOME:-}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-session-manager-test.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/csm-test.XXXXXX")"
 TEST_HOME="$TMP_DIR/home"
 TEST_CODEX_HOME="$TMP_DIR/codex-home"
 TEST_BIN="$TMP_DIR/bin"
 FAKE_CODEX_LOG="$TMP_DIR/fake-codex.log"
-QUARANTINE_ROOT="$TMP_DIR/xdg-data/codex-session-manager/quarantine"
+QUARANTINE_ROOT="$TMP_DIR/xdg-data/csm/quarantine"
 PATH_WITH_FAKE="$TEST_BIN:$PATH"
-PROJECT_CWD="/tmp/codex-session-manager-project"
+PROJECT_CWD="/tmp/csm-project"
 
 safe_cleanup() {
   local status=$?
@@ -238,6 +240,11 @@ assert_contains() {
   fi
 }
 
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
 run_tui() {
   local keys="$1"
   local log="$2"
@@ -266,7 +273,7 @@ except BrokenPipeError:
 os._exit(0)
 PY
   } | script -q -e -O "$log" -c \
-    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$TEST_CODEX_HOME' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/codex-session-manager.js' --cwd '$PROJECT_CWD' $manager_args" \
+    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$TEST_CODEX_HOME' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/bin/csm' --cwd '$PROJECT_CWD' $manager_args" \
     >/dev/null
   local script_status="${PIPESTATUS[1]}"
   set -o pipefail
@@ -357,7 +364,7 @@ write_non_rollout_filename "$uuid_aa" "2026-07-20T00:00:09" "case N non rollout 
 write_thread_title "$uuid_a" "case A renamed title" "case A later parent metadata"
 write_thread_title "$uuid_c" "case B subagent parent metadata" "case B subagent parent metadata"
 
-json_output="$(isolated_env "$SCRIPT_DIR/codex-session-manager.js" --cwd "$PROJECT_CWD" --list all --json)"
+json_output="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all --json)"
 assert_json_entry "$json_output" "case A later parent metadata" "entry.id === '$uuid_a' && entry.mutationSafe === true"
 assert_json_entry "$json_output" "case A later parent metadata" "entry.title === 'case A renamed title'"
 assert_json_entry "$json_output" "case B subagent parent metadata" "entry.id === '$uuid_c' && entry.mutationSafe === true"
@@ -370,7 +377,7 @@ assert_json_entry "$json_output" "case K uppercase filename id" "entry.id === '$
 assert_json_entry "$json_output" "case L terminal spoof" "entry.summary === 'case L terminal spoof' && !/[\\u0000-\\u001f\\u007f-\\u009f]/.test(entry.summary)"
 assert_json_entry "$json_output" "case N non rollout filename" "entry.mutationSafe === false && /filename/i.test(entry.unsafeReason || '')"
 
-list_output="$(isolated_env "$SCRIPT_DIR/codex-session-manager.js" --cwd "$PROJECT_CWD" --list all)"
+list_output="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all)"
 assert_contains "$list_output" "unsafe:"
 assert_contains "$list_output" "case A renamed title"
 if LC_ALL=C grep -q "$(printf '\033')" <<< "$list_output"; then
@@ -510,6 +517,77 @@ if [[ -e "$force_delete_file" ]]; then
   exit 1
 fi
 assert_not_quarantined "$force_delete_file"
+
+installer_home="$TMP_DIR/installer-home"
+mkdir -p "$installer_home"
+printf '%s\n' \
+  '# keep installer fixture' \
+  'export BACKUP_PATH="$HOME/.local/bin"' > "$installer_home/.bashrc"
+HOME="$installer_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$installer_home/install.out"
+[ -L "$installer_home/.local/bin/csm" ] || \
+  fail 'installer did not create the csm symlink'
+[ "$(readlink "$installer_home/.local/bin/csm")" = "$SCRIPT_DIR/bin/csm" ] || \
+  fail 'installer created a link to the wrong executable'
+assert_contains "$(cat "$installer_home/.bashrc")" '# >>> script-store csm >>>'
+HOME="$installer_home" CODEX_HOME="$TEST_CODEX_HOME" PATH="$installer_home/.local/bin:$PATH_WITH_FAKE" \
+  csm --cwd "$PROJECT_CWD" --list active >/dev/null
+
+HOME="$installer_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$installer_home/reinstall.out"
+if [ "$(grep -F -c '# >>> script-store csm >>>' "$installer_home/.bashrc")" -ne 1 ]; then
+  fail 'installer duplicated its managed PATH block'
+fi
+
+HOME="$installer_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall \
+  > "$installer_home/uninstall.out"
+[ ! -e "$installer_home/.local/bin/csm" ] && \
+  [ ! -L "$installer_home/.local/bin/csm" ] || \
+  fail 'uninstall left the managed csm link behind'
+assert_contains "$(cat "$installer_home/.bashrc")" '# keep installer fixture'
+if grep -F -q '# >>> script-store csm >>>' "$installer_home/.bashrc"; then
+  fail 'uninstall left the managed PATH block behind'
+fi
+
+collision_home="$TMP_DIR/installer-collision-home"
+mkdir -p "$collision_home/.local/bin"
+printf 'user-owned executable\n' > "$collision_home/.local/bin/csm"
+set +e
+HOME="$collision_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" \
+  > "$collision_home/stdout" 2> "$collision_home/stderr"
+collision_status=$?
+set -e
+[ "$collision_status" -ne 0 ] || fail 'installer accepted a conflicting executable'
+[ "$(cat "$collision_home/.local/bin/csm")" = 'user-owned executable' ] || \
+  fail 'installer overwrote a conflicting executable'
+assert_contains "$(cat "$collision_home/stderr")" 'refusing to overwrite'
+
+modified_home="$TMP_DIR/installer-modified-home"
+mkdir -p "$modified_home/.local/bin"
+ln -s "$SCRIPT_DIR/bin/csm" "$modified_home/.local/bin/csm"
+printf '%s\n' \
+  '# >>> script-store csm >>>' \
+  'export PATH="$HOME/.local/bin:$PATH"' \
+  'export KEEP_USER_LINE=1' \
+  '# <<< script-store csm <<<' > "$modified_home/.zshrc"
+cp "$modified_home/.zshrc" "$modified_home/.zshrc.before"
+set +e
+HOME="$modified_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" --uninstall \
+  > "$modified_home/stdout" 2> "$modified_home/stderr"
+modified_status=$?
+set -e
+[ "$modified_status" -ne 0 ] || fail 'uninstaller accepted a modified managed block'
+[ -L "$modified_home/.local/bin/csm" ] || \
+  fail 'uninstaller removed the link before marker preflight'
+cmp -s "$modified_home/.zshrc.before" "$modified_home/.zshrc" || \
+  fail 'uninstaller changed a modified managed block'
+
+dry_home="$TMP_DIR/installer-dry-home"
+HOME="$dry_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" --dry-run \
+  > "$TMP_DIR/installer-dry-run.out"
+[ ! -e "$dry_home" ] || fail 'installer dry-run changed the temporary HOME'
+assert_contains "$(cat "$TMP_DIR/installer-dry-run.out")" 'Would create link'
+assert_contains "$(cat "$TMP_DIR/installer-dry-run.out")" 'Would add the managed PATH block'
 
 printf '%s\n' "$archive_file" "$delete_file" "$unarchive_file" "$multi_one_file" "$multi_two_file" \
   "$safe_multi_file" "$unsafe_multi_file" "$cancel_file" "$unsafe_archived_file" "$safe_archived_file" \

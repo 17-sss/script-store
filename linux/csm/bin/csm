@@ -8,7 +8,7 @@ const path = require('path');
 const readline = require('readline');
 const {spawnSync} = require('child_process');
 
-const APP_NAME = 'codex-session-manager';
+const APP_NAME = 'csm';
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_EXACT_RE = new RegExp(`^${UUID_PATTERN}$`, 'i');
 const FILENAME_UUID_RE = new RegExp(`^rollout-.+-(${UUID_PATTERN})\\.jsonl$`, 'i');
@@ -115,12 +115,12 @@ function die(message) {
 }
 
 function printUsage() {
-  console.log(`codex-session-manager - browse and manage local Codex sessions
+  console.log(`csm - browse and manage local Codex sessions
 
 Usage:
-  codex-session-manager.js [--all] [--cwd PATH] [--codex-home PATH]
-                           [--quarantine-dir PATH] [--force]
-  codex-session-manager.js --list active|archived|all [--all] [--json]
+  csm [--all] [--cwd PATH] [--codex-home PATH]
+      [--quarantine-dir PATH] [--force]
+  csm --list active|archived|all [--all] [--json]
 
 Keys:
   Up/Down or j/k   Move selection

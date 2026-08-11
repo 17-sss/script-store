@@ -1,4 +1,4 @@
-# codex-session-manager
+# csm
 
 Codex 로컬 세션을 TUI에서 찾고, 선택해서 보관/보관취소/격리/영구 삭제하는 도구입니다.
 
@@ -13,16 +13,35 @@ Codex CLI는 `resume`, `archive`, `delete`, `unarchive`는 제공하지만, 현�
 
 ## Quick Start
 
+설치해서 어느 폴더에서나 `csm` 명령으로 실행하려면 저장소 루트에서 다음을 실행합니다.
+
+```bash
+./linux/csm/install-csm.sh
+source ~/.zshrc # zsh
+# source ~/.bashrc # bash
+```
+
+설치기는 이 저장소의 `bin/csm`을 `~/.local/bin/csm`에 절대 심볼릭 링크합니다. `~/.local/bin`이 현재 `PATH`와 선택한 rc 파일 어디에도 없을 때만 관리되는 PATH 블록을 추가합니다. 사용자 파일이나 다른 대상을 가리키는 링크가 이미 있으면 덮어쓰지 않고 중단합니다.
+
+설치 변경을 미리 보거나 제거할 수 있습니다.
+
+```bash
+./linux/csm/install-csm.sh --dry-run
+./linux/csm/install-csm.sh --uninstall
+```
+
+`--shell bash|zsh`와 `--rc-file PATH`도 지원합니다. 제거 시에는 설치기가 만든 정확한 링크와 수정되지 않은 PATH 블록만 제거합니다.
+
 이 README가 있는 폴더에서 실행:
 
 ```bash
-./codex-session-manager.js
+./bin/csm
 ```
 
 repo 루트에서 실행:
 
 ```bash
-./linux/codex-session-manager/codex-session-manager.js
+./linux/csm/bin/csm
 ```
 
 기본 화면은 **현재 실행한 폴더와 그 하위 폴더에서 열린 Codex 세션**만 보여줍니다. 전체 로컬 세션을 보고 싶으면 TUI 안에서 `a`를 누르세요.
@@ -34,7 +53,7 @@ repo 루트에서 실행:
 상단 상태줄은 이런 형태입니다.
 
 ```txt
-codex-session-manager | View: active | Scope: current folder | Marked: 0 | Sessions: 3
+csm | View: active | Scope: current folder | Marked: 0 | Sessions: 3
 ```
 
 - `View`: `active`는 일반 세션, `archived`는 아카이브된 세션입니다.
@@ -93,10 +112,10 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 기본 실행에서 `d`는 삭제가 아니라 격리입니다. 선택한 JSONL 파일만 아래 기본 위치의 새 batch 디렉터리로 옮기며, batch마다 원래 경로와 보관된 상대 경로를 기록한 `manifest.json`을 생성합니다.
 
 ```txt
-$XDG_DATA_HOME/codex-session-manager/quarantine
+$XDG_DATA_HOME/csm/quarantine
 ```
 
-`XDG_DATA_HOME`이 없으면 `~/.local/share/codex-session-manager/quarantine`을 사용합니다. 다른 위치를 쓰려면 `--quarantine-dir PATH`를 지정할 수 있습니다. active/archived 세션 디렉터리 안쪽이나 홈/CODEX_HOME 자체처럼 지나치게 넓은 경로는 거부합니다.
+`XDG_DATA_HOME`이 없으면 `~/.local/share/csm/quarantine`을 사용합니다. 다른 위치를 쓰려면 `--quarantine-dir PATH`를 지정할 수 있습니다. active/archived 세션 디렉터리 안쪽이나 홈/CODEX_HOME 자체처럼 지나치게 넓은 경로는 거부합니다.
 
 격리 확인 문구:
 
@@ -109,7 +128,7 @@ QUARANTINE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 격리 없이 영구 삭제하려면 처음부터 `--force`로 TUI를 실행합니다.
 
 ```bash
-./codex-session-manager.js --force
+./bin/csm --force
 ```
 
 상단의 `Delete: permanent`와 `d=PERMADEL` 표시로 영구 삭제 모드임을 확인할 수 있습니다. 이 모드의 확인 문구는 더 강하게 구분됩니다.
@@ -133,16 +152,16 @@ transcript에서 읽은 제목, 경로, source 같은 표시 문자열에서는 
 TUI를 열지 않고 목록만 보고 싶을 때 쓸 수 있습니다.
 
 ```bash
-./codex-session-manager.js --list active
-./codex-session-manager.js --list archived
-./codex-session-manager.js --list all --all
-./codex-session-manager.js --list all --json --all
+./bin/csm --list active
+./bin/csm --list archived
+./bin/csm --list all --all
+./bin/csm --list all --json --all
 ```
 
 테스트나 다른 Codex home을 확인할 때는 `CODEX_HOME`을 바꿀 수 있습니다.
 
 ```bash
-CODEX_HOME=/tmp/example-codex ./codex-session-manager.js --list all --all
+CODEX_HOME=/tmp/example-codex ./bin/csm --list all --all
 ```
 
 ## Data Sources
@@ -175,3 +194,5 @@ codex unarchive <SESSION_UUID>
 ```
 
 테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/영구 삭제도 임시 fixture만 대상으로 확인합니다.
+
+설치 테스트 역시 임시 HOME만 사용하며 실제 `~/.local/bin`, `.bashrc`, `.zshrc`를 변경하지 않습니다.
