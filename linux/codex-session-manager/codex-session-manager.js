@@ -876,7 +876,7 @@ function render(state) {
     lines.push(truncate(`id: ${selected.id}  safety: ${safety}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
     lines.push(truncate(`cwd: ${selected.cwd || '(unknown)'}`, width));
     lines.push(truncate(`file: ${sanitizeTerminalText(selected.file)}`, width));
-    lines.push(truncate(`name: ${selected.title || '(no renamed name)'}`, width));
+    lines.push(truncate(`name: ${selected.title || selected.summary}`, width));
     lines.push(truncate(`prompt: ${selected.summary}`, width));
   } else {
     lines.push('No sessions in this view.');
@@ -1172,9 +1172,17 @@ function loadThreadTitles(codexHome) {
     }
     const database = new DatabaseSync(databasePath, {readOnly: true});
     try {
-      const rows = database.prepare('SELECT id, title FROM threads WHERE trim(title) <> \'\'').all();
+      const rows = database.prepare(`
+        SELECT id, title, first_user_message
+        FROM threads
+        WHERE trim(title) <> ''
+      `).all();
       return new Map(rows
-        .filter((row) => normalizeUuid(row.id) && typeof row.title === 'string')
+        .filter((row) => (
+          normalizeUuid(row.id) &&
+          typeof row.title === 'string' &&
+          normalizeStoredText(row.title) !== normalizeStoredText(row.first_user_message)
+        ))
         .map((row) => [normalizeUuid(row.id), row.title]));
     } finally {
       database.close();
@@ -1182,6 +1190,10 @@ function loadThreadTitles(codexHome) {
   } catch {
     return new Map();
   }
+}
+
+function normalizeStoredText(value) {
+  return typeof value === 'string' ? value.replace(/\r\n/g, '\n').trim() : '';
 }
 
 function safeReadPreview(file) {
