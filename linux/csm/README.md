@@ -68,6 +68,7 @@ csm | View: active | Scope: current folder | Marked: 0 | Sessions: 3
 3. 방향키 또는 `j` / `k`로 원하는 세션에 커서를 둡니다.
 4. `Space`로 행을 선택합니다. 여러 개를 선택하면 한 번에 처리할 수 있습니다.
 5. `b`, `u`, `d`로 보관, 보관취소, 격리를 실행합니다.
+6. active 세션 하나의 writer 점유를 진단하거나 해제해야 할 때만 `x`를 사용합니다.
 
 선택된 행이 하나라도 있으면 `b`, `u`, `d`는 **선택된 행 전체**에 적용됩니다. 선택된 행이 없으면 **현재 커서가 있는 행 하나**에 적용됩니다.
 
@@ -105,7 +106,27 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 | `b` | active 세션 보관 |
 | `u` | archived 세션 보관취소 |
 | `d` | 세션 격리 (`--force` 실행 시 영구 삭제) |
+| `x` | active 세션 하나의 local writer 진단 / terminate writer recovery |
 | `q` | 종료 |
+
+## Writer recovery / terminate writer
+
+`x`는 active 세션 한 개에만 사용할 수 있습니다. archived 세션과 다중 선택은 즉시 차단하며 어떤 프로세스도 종료하지 않습니다. 이 기능은 transcript를 archive, unarchive, 이동, 격리, 삭제하지 않습니다.
+
+Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키지는 사용하지 않습니다.
+
+- 실행 직전에 기존 변경 작업과 같은 안전 gate를 적용합니다. filename UUID와 첫 번째 `session_meta.payload.id`가 일치하고, 정확한 active sessions root 아래 JSONL이어야 합니다.
+- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. `/proc`을 읽을 수 없거나 권한 때문에 완전하게 진단할 수 없으면 진단 불가로 표시하고 종료하지 않습니다.
+- PID, process name/command, 그 프로세스가 함께 열고 있는 다른 Codex transcript 수를 terminal-control sanitization 후 보여 줍니다.
+- local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
+
+종료는 정확히 하나의 Codex writer 후보일 때만 가능합니다. 확인 화면은 다른 Codex 세션도 끊길 수 있음을 경고하고, 아래처럼 full UUID와 PID를 모두 포함한 정확한 입력을 요구합니다.
+
+```txt
+TERMINATE WRITER 019efcef-19e5-7a83-821a-1b3ec9e1716d 12345
+```
+
+확인 직후에도 transcript identity, target `dev`/`ino`, PID의 UID와 process start identity, 해당 PID의 target FD 점유를 모두 다시 확인합니다. 통과한 정확한 PID 하나에만 `SIGTERM`을 보내며 process group, parent/child tree, `pkill`, `SIGKILL`, sudo는 사용하지 않습니다. 짧게 기다린 뒤 FD 점유를 다시 검사해 해제 성공 또는 미해제 상태를 표시합니다.
 
 ## 격리와 영구 삭제
 

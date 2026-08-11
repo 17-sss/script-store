@@ -134,6 +134,7 @@ Keys:
   b                Archive selected or cursor session
   u                Unarchive selected or cursor session
   d                Quarantine selected or cursor session
+  x                Diagnose/terminate one active Codex transcript writer
   R                Refresh
   q                Quit
 
@@ -288,6 +289,8 @@ async function handleKey(state, key) {
     await unarchiveSelected(state);
   } else if (key === 'd') {
     await deleteSelected(state);
+  } else if (key === 'x') {
+    await recoverWriterSelected(state);
   } else if (key === 'R') {
     refresh(state);
   }
@@ -416,6 +419,175 @@ async function deleteSelected(state) {
     state.selected.clear();
   }
   refresh(state);
+}
+
+async function recoverWriterSelected(state) {
+  if (state.view !== 'active') {
+    state.status = 'Writer recovery is available only for active sessions';
+    return;
+  }
+
+  const targets = actionTargetEntries(state);
+  if (targets.length !== 1) {
+    state.status = targets.length === 0
+      ? 'Writer recovery needs one active session'
+      : 'Writer recovery is blocked for multiple selected sessions';
+    return;
+  }
+
+  let checked = await checkedMutationTargets(state, targets, 'writer recovery');
+  if (!checked || checked.length !== 1) {
+    return;
+  }
+
+  let entry = checked[0];
+  let diagnosis = diagnoseLocalWriters(entry.file, state.options);
+  if (!diagnosis.available) {
+    await showWriterDiagnostics(state, 'Writer recovery unavailable', diagnosis);
+    state.status = `Writer recovery unavailable: ${diagnosis.reason}`;
+    return;
+  }
+
+  if (diagnosis.holders.length === 0) {
+    state.status = 'No local writer holds this transcript';
+    return;
+  }
+
+  const codexWriters = diagnosis.holders.filter((holder) => holder.codexRelated);
+  const unrecognizedHolders = diagnosis.holders.filter((holder) => !holder.codexRelated);
+  if (codexWriters.length !== 1 || unrecognizedHolders.length > 0) {
+    await showWriterDiagnostics(state, 'Writer recovery blocked', diagnosis);
+    const reason = unrecognizedHolders.length > 0
+      ? 'an unrecognized local process holds this transcript'
+      : `${codexWriters.length} Codex writer candidates hold this transcript`;
+    state.status = `Writer recovery blocked: ${reason}`;
+    return;
+  }
+
+  const writer = codexWriters[0];
+  const expected = `TERMINATE WRITER ${entry.canonicalId} ${writer.pid}`;
+  const answer = await promptLine(state, writerRecoveryConfirmationPrompt(entry, writer, expected));
+  if (answer.trim() !== expected) {
+    state.status = `Writer recovery cancelled. Required input was ${expected}`;
+    return;
+  }
+
+  checked = await checkedMutationTargets(state, [entry], 'writer recovery');
+  if (!checked || checked.length !== 1) {
+    return;
+  }
+  entry = checked[0];
+
+  const recheck = revalidateWriterRecovery(entry, writer, diagnosis.target, state.options);
+  if (!recheck.ok) {
+    state.status = `Writer recovery blocked: ${recheck.reason}`;
+    return;
+  }
+
+  try {
+    process.kill(writer.pid, 'SIGTERM');
+  } catch (error) {
+    state.status = `Writer recovery failed: SIGTERM was not sent to PID ${writer.pid}: ${sanitizeTerminalText(error.message)}`;
+    return;
+  }
+
+  await waitForWriterRelease();
+  diagnosis = diagnoseLocalWriters(entry.file, state.options);
+  refresh(state);
+  if (!diagnosis.available) {
+    state.status = `SIGTERM sent to PID ${writer.pid}, but writer release could not be verified: ${diagnosis.reason}`;
+  } else if (diagnosis.holders.length === 0) {
+    state.status = `Writer recovery succeeded: PID ${writer.pid} released this transcript after SIGTERM`;
+  } else {
+    state.status = `Writer recovery unresolved: local writer FD still holds this transcript after SIGTERM`;
+  }
+}
+
+function writerRecoveryConfirmationPrompt(entry, writer, expected) {
+  return [
+    danger('Terminate writer confirmation'),
+    `${strong('Transcript:')} ${entry.canonicalId}`,
+    `${strong('PID:')} ${writer.pid}`,
+    `${strong('Process name:')} ${sanitizeTerminalText(writer.name) || '(unknown)'}`,
+    `${strong('Command:')} ${sanitizeTerminalText(writer.command) || '(unavailable)'}`,
+    `${strong('Other Codex transcripts held:')} ${writer.otherTranscriptCount}`,
+    '',
+    danger('This process may interrupt other Codex sessions.'),
+    warningText('The transcript file will not be deleted, moved, archived, or unarchived.'),
+    warningText('CSM will send SIGTERM only to this exact PID.'),
+    `${strong('Required input:')} ${requiredInput(expected)}`,
+    `${keyText('> ')}`,
+  ].join('\n');
+}
+
+async function showWriterDiagnostics(state, heading, diagnosis) {
+  const lines = [
+    danger(heading),
+    diagnosis.available
+      ? `${strong('Target dev/inode:')} ${diagnosis.target.dev}/${diagnosis.target.ino}`
+      : `${strong('Reason:')} ${sanitizeTerminalText(diagnosis.reason)}`,
+  ];
+
+  if (diagnosis.holders.length === 0 && diagnosis.available) {
+    lines.push('No local writer holds this transcript.');
+  } else {
+    lines.push('', strong('Local same-user file holders:'));
+    for (const holder of diagnosis.holders) {
+      lines.push(...formatWriterHolder(holder));
+    }
+  }
+
+  lines.push('', dim('No SIGTERM was sent.'), '');
+  await promptLine(state, `${lines.join('\n')}${keyText('Press Enter to return: ')}`);
+}
+
+function formatWriterHolder(holder) {
+  const kind = holder.codexRelated ? 'Codex candidate' : 'unrecognized holder (termination blocked)';
+  return [
+    `- ${kind}: PID ${holder.pid}`,
+    `  name: ${sanitizeTerminalText(holder.name) || '(unknown)'}`,
+    `  command: ${sanitizeTerminalText(holder.command) || '(unavailable)'}`,
+    `  other Codex transcripts held: ${holder.otherTranscriptCount}`,
+  ];
+}
+
+function revalidateWriterRecovery(entry, writer, originalTarget, options) {
+  const fresh = readEntry(entry.file, 'active');
+  const mutationReason = mutationBlockReason(entry, fresh, options);
+  if (mutationReason) {
+    return {ok: false, reason: mutationReason};
+  }
+
+  const target = fileIdentity(entry.file);
+  if (!target.ok) {
+    return {ok: false, reason: `target transcript could not be statted: ${target.reason}`};
+  }
+  if (!sameFileIdentity(target, originalTarget)) {
+    return {ok: false, reason: 'target dev/inode changed before SIGTERM'};
+  }
+
+  const current = inspectProcessForTarget(writer.pid, target, options);
+  if (!current.available) {
+    return {ok: false, reason: current.reason};
+  }
+  if (!current.exists) {
+    return {ok: false, reason: `PID ${writer.pid} exited before SIGTERM`};
+  }
+  if (current.startTime !== writer.startTime) {
+    return {ok: false, reason: `PID ${writer.pid} start identity changed before SIGTERM`};
+  }
+  if (!current.holdsTarget) {
+    return {ok: false, reason: `PID ${writer.pid} no longer holds the target transcript`};
+  }
+  if (!current.codexRelated) {
+    return {ok: false, reason: `PID ${writer.pid} is no longer identified as a Codex process`};
+  }
+
+  return {ok: true};
+}
+
+function waitForWriterRelease() {
+  return new Promise((resolve) => setTimeout(resolve, 300));
 }
 
 function deleteConfirmationText(entries, permanent) {
@@ -693,6 +865,242 @@ function mutationPathBlockReason(entry, options) {
   return '';
 }
 
+function diagnoseLocalWriters(file, options) {
+  const target = fileIdentity(file);
+  if (!target.ok) {
+    return unavailableWriterDiagnosis(`target transcript could not be statted: ${target.reason}`);
+  }
+  if (process.platform !== 'linux') {
+    return unavailableWriterDiagnosis('local writer discovery requires Linux /proc');
+  }
+  if (typeof process.getuid !== 'function') {
+    return unavailableWriterDiagnosis('current user UID is unavailable');
+  }
+
+  let processEntries;
+  try {
+    processEntries = fs.readdirSync('/proc', {withFileTypes: true});
+  } catch (error) {
+    return unavailableWriterDiagnosis(`/proc could not be read: ${error.message}`);
+  }
+
+  const holders = [];
+  for (const item of processEntries) {
+    if (!item.isDirectory() || !/^\d+$/.test(item.name)) {
+      continue;
+    }
+
+    const inspected = inspectProcessForTarget(Number(item.name), target, options);
+    if (!inspected.available) {
+      return unavailableWriterDiagnosis(inspected.reason);
+    }
+    if (inspected.exists && inspected.holdsTarget) {
+      holders.push(inspected);
+    }
+  }
+
+  return {available: true, reason: '', target, holders};
+}
+
+function unavailableWriterDiagnosis(reason) {
+  return {
+    available: false,
+    reason: sanitizeTerminalText(reason) || 'writer diagnostics are unavailable',
+    target: null,
+    holders: [],
+  };
+}
+
+function fileIdentity(file) {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) {
+      return {ok: false, reason: 'target is not a regular file'};
+    }
+    return {ok: true, dev: String(stat.dev), ino: String(stat.ino)};
+  } catch (error) {
+    return {ok: false, reason: sanitizeTerminalText(error.message)};
+  }
+}
+
+function sameFileIdentity(left, right) {
+  return Boolean(
+    left && right && left.ok && right.ok &&
+    left.dev === right.dev && left.ino === right.ino
+  );
+}
+
+function inspectProcessForTarget(pid, target, options) {
+  const procRoot = path.join('/proc', String(pid));
+  let owner;
+  try {
+    owner = fs.statSync(procRoot).uid;
+  } catch (error) {
+    if (processGone(error)) {
+      return {available: true, exists: false, holdsTarget: false};
+    }
+    return unavailableProcessInspection(`could not read /proc/${pid}: ${error.message}`);
+  }
+
+  const uid = process.getuid();
+  if (owner !== uid) {
+    return {available: true, exists: true, holdsTarget: false, sameUser: false};
+  }
+
+  const start = readProcessStartTime(pid);
+  if (!start.ok) {
+    if (start.gone) {
+      return {available: true, exists: false, holdsTarget: false};
+    }
+    return unavailableProcessInspection(start.reason);
+  }
+
+  const descriptorScan = inspectProcessDescriptors(pid, target, options);
+  if (!descriptorScan.ok) {
+    if (descriptorScan.gone) {
+      return {available: true, exists: false, holdsTarget: false};
+    }
+    return unavailableProcessInspection(descriptorScan.reason);
+  }
+
+  const processText = readProcessText(pid);
+  if (!processText.ok) {
+    if (processText.gone) {
+      return {available: true, exists: false, holdsTarget: false};
+    }
+    return unavailableProcessInspection(processText.reason);
+  }
+
+  return {
+    available: true,
+    exists: true,
+    sameUser: true,
+    pid,
+    startTime: start.value,
+    name: processText.name,
+    command: processText.command,
+    codexRelated: reliablyIdentifiesCodexProcess(processText.name, processText.argv),
+    holdsTarget: descriptorScan.holdsTarget,
+    otherTranscriptCount: descriptorScan.otherTranscriptCount,
+  };
+}
+
+function unavailableProcessInspection(reason) {
+  return {
+    available: false,
+    exists: false,
+    holdsTarget: false,
+    reason: sanitizeTerminalText(reason) || 'could not inspect a same-user process',
+  };
+}
+
+function readProcessStartTime(pid) {
+  try {
+    const stat = fs.readFileSync(path.join('/proc', String(pid), 'stat'), 'utf8');
+    const commandEnd = stat.lastIndexOf(')');
+    if (commandEnd < 0) {
+      return {ok: false, reason: `could not parse /proc/${pid}/stat`};
+    }
+    const fields = stat.slice(commandEnd + 1).trim().split(/\s+/);
+    // Field 22 is starttime. The tail starts at field 3 after the command.
+    const startTime = fields[19];
+    if (!startTime || !/^\d+$/.test(startTime)) {
+      return {ok: false, reason: `could not read process start identity for PID ${pid}`};
+    }
+    return {ok: true, value: startTime};
+  } catch (error) {
+    return processGone(error)
+      ? {ok: false, gone: true}
+      : {ok: false, reason: `could not read /proc/${pid}/stat: ${error.message}`};
+  }
+}
+
+function inspectProcessDescriptors(pid, target, options) {
+  const fdRoot = path.join('/proc', String(pid), 'fd');
+  let descriptors;
+  try {
+    descriptors = fs.readdirSync(fdRoot, {withFileTypes: true});
+  } catch (error) {
+    return processGone(error)
+      ? {ok: false, gone: true}
+      : {ok: false, reason: `could not read ${fdRoot}: ${error.message}`};
+  }
+
+  let holdsTarget = false;
+  const otherTranscripts = new Set();
+  for (const descriptor of descriptors) {
+    if (!/^\d+$/.test(descriptor.name)) {
+      continue;
+    }
+
+    const descriptorPath = path.join(fdRoot, descriptor.name);
+    let stat;
+    try {
+      stat = fs.statSync(descriptorPath);
+    } catch (error) {
+      if (processGone(error)) {
+        continue;
+      }
+      return {ok: false, reason: `could not stat ${descriptorPath}: ${error.message}`};
+    }
+
+    const identity = {ok: true, dev: String(stat.dev), ino: String(stat.ino)};
+    if (sameFileIdentity(identity, target)) {
+      holdsTarget = true;
+      continue;
+    }
+
+    let linkedFile;
+    try {
+      linkedFile = fs.readlinkSync(descriptorPath);
+    } catch (error) {
+      if (processGone(error)) {
+        continue;
+      }
+      return {ok: false, reason: `could not read ${descriptorPath}: ${error.message}`};
+    }
+    if (isCodexTranscriptPath(linkedFile, options)) {
+      otherTranscripts.add(`${identity.dev}:${identity.ino}`);
+    }
+  }
+
+  return {ok: true, holdsTarget, otherTranscriptCount: otherTranscripts.size};
+}
+
+function isCodexTranscriptPath(value, options) {
+  const linkedFile = String(value || '').replace(/ \(deleted\)$/, '');
+  return path.extname(linkedFile) === '.jsonl' && (
+    isUnderPath(linkedFile, sessionsDir(options)) ||
+    isUnderPath(linkedFile, archivedDir(options))
+  );
+}
+
+function readProcessText(pid) {
+  try {
+    const name = fs.readFileSync(path.join('/proc', String(pid), 'comm'), 'utf8').trim();
+    const argv = fs.readFileSync(path.join('/proc', String(pid), 'cmdline'), 'utf8')
+      .split('\0')
+      .filter(Boolean);
+    return {ok: true, name, argv, command: argv.join(' ')};
+  } catch (error) {
+    return processGone(error)
+      ? {ok: false, gone: true}
+      : {ok: false, reason: `could not read process name/command for PID ${pid}: ${error.message}`};
+  }
+}
+
+function reliablyIdentifiesCodexProcess(name, argv) {
+  const candidates = [name, argv[0]].filter(Boolean);
+  return candidates.some((candidate) => {
+    const base = path.basename(String(candidate)).toLowerCase();
+    return base === 'codex' || /^codex[-_.][a-z0-9_.-]+$/.test(base);
+  });
+}
+
+function processGone(error) {
+  return error && (error.code === 'ENOENT' || error.code === 'ESRCH');
+}
+
 async function showBlockedMutation(state, action, unsafe) {
   const lines = [
     danger(`Blocked ${action}: unsafe session selected`),
@@ -848,7 +1256,7 @@ function render(state) {
   } else {
     lines.push(truncateStyled(`Move: ${keyText('Up/Down,j/k')} | ${keyText('Tab')}=list | ${keyText('a')}=scope | ${keyText('/')}=search | ${keyText('R')}=refresh | ${keyText('q')}=quit`, width));
     const deleteLabel = state.options.forceDelete ? danger('d=PERMADEL') : warningText('d=quarantine');
-    lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${deleteLabel}`, width));
+    lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${deleteLabel} ${warningText('x')}=writer recovery`, width));
   }
 
   const start = state.scroll;

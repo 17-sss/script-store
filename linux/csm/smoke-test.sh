@@ -2,6 +2,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# Writer discovery must fail closed when an unrelated same-UID /proc entry is
+# unreadable. Run this fixture suite in its own PID namespace when available so
+# that the positive case has a complete, isolated /proc view as well.
+if [[ "${CSM_SMOKE_PID_NAMESPACE:-}" != "1" ]] && command -v unshare >/dev/null 2>&1; then
+  if unshare --user --map-root-user --pid --fork --mount-proc true >/dev/null 2>&1; then
+    exec env CSM_SMOKE_PID_NAMESPACE=1 \
+      unshare --user --map-root-user --pid --fork --mount-proc "$0" "$@"
+  fi
+fi
+
 INSTALLER="$SCRIPT_DIR/install-csm.sh"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 ORIGINAL_PATH="$PATH"
@@ -15,9 +26,17 @@ FAKE_CODEX_LOG="$TMP_DIR/fake-codex.log"
 QUARANTINE_ROOT="$TMP_DIR/xdg-data/csm/quarantine"
 PATH_WITH_FAKE="$TEST_BIN:$PATH"
 PROJECT_CWD="/tmp/csm-project"
+WRITER_PIDS=()
 
 safe_cleanup() {
   local status=$?
+  local writer_pid
+  for writer_pid in "${WRITER_PIDS[@]}"; do
+    if [[ "$writer_pid" =~ ^[0-9]+$ ]] && kill -0 "$writer_pid" 2>/dev/null; then
+      kill -TERM "$writer_pid" 2>/dev/null || true
+      wait "$writer_pid" 2>/dev/null || true
+    fi
+  done
   if [[ -z "${TMP_DIR:-}" || "$TMP_DIR" == "/" ]]; then
     printf 'refusing to clean unsafe tmp path: %s\n' "${TMP_DIR:-}" >&2
     exit 1
@@ -57,6 +76,35 @@ if [[ -n "${FAKE_CODEX_MUTATE_FILE:-}" && "$(wc -l < "$FAKE_CODEX_LOG")" -eq 1 ]
 fi
 FAKE_CODEX
 chmod +x "$TEST_BIN/codex"
+
+cat > "$TMP_DIR/fake-codex-writer.js" <<'FAKE_WRITER'
+'use strict';
+
+const fs = require('fs');
+
+const [file, readyFile, signalLog, closeTrigger] = process.argv.slice(2);
+const fd = fs.openSync(file, 'r+');
+let closed = false;
+
+function closeAndExit() {
+  if (!closed) {
+    fs.closeSync(fd);
+    closed = true;
+  }
+  process.exit(0);
+}
+
+fs.writeFileSync(readyFile, 'ready\n');
+process.on('SIGTERM', () => {
+  fs.writeFileSync(signalLog, 'SIGTERM\n', {flag: 'a'});
+  closeAndExit();
+});
+setInterval(() => {
+  if (closeTrigger && fs.existsSync(closeTrigger)) {
+    closeAndExit();
+  }
+}, 20);
+FAKE_WRITER
 
 isolated_env() {
   env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME \
@@ -111,6 +159,16 @@ uuid_af="019f1000-0000-7000-8000-000000000032"
 uuid_ag="019f1000-0000-7000-8000-000000000033"
 uuid_ah="019f1000-0000-7000-8000-000000000034"
 uuid_ai="019f1000-0000-7000-8000-000000000035"
+uuid_aj="019f1000-0000-7000-8000-000000000036"
+uuid_ak="019f1000-0000-7000-8000-000000000037"
+uuid_al="019f1000-0000-7000-8000-000000000038"
+uuid_am="019f1000-0000-7000-8000-000000000039"
+uuid_an="019f1000-0000-7000-8000-000000000040"
+uuid_ao="019f1000-0000-7000-8000-000000000041"
+uuid_ap="019f1000-0000-7000-8000-000000000042"
+uuid_aq="019f1000-0000-7000-8000-000000000043"
+uuid_ar="019f1000-0000-7000-8000-000000000044"
+uuid_as="019f1000-0000-7000-8000-000000000045"
 
 write_session() {
   local area="$1"
@@ -267,7 +325,7 @@ data = sys.argv[1].encode('utf-8').decode('unicode_escape')
 try:
     for char in data:
         os.write(1, char.encode('utf-8'))
-        time.sleep(0.08)
+        time.sleep(0.6 if char == 'x' else 0.08)
 except BrokenPipeError:
     os._exit(0)
 os._exit(0)
@@ -281,6 +339,60 @@ PY
     printf 'TUI script run failed with exit %s\n' "$script_status" >&2
     exit "$script_status"
   fi
+}
+
+start_fake_writer() {
+  local file="$1"
+  local process_name="$2"
+  local writer_tag="${RANDOM}-${RANDOM}"
+  local ready_file="$TMP_DIR/writer-$writer_tag.ready"
+  WRITER_SIGNAL_LOG="$TMP_DIR/writer-$writer_tag.signal"
+  WRITER_CLOSE_TRIGGER="$TMP_DIR/writer-$writer_tag.close"
+  : > "$WRITER_SIGNAL_LOG"
+
+  (
+    exec -a "$process_name" node "$TMP_DIR/fake-codex-writer.js" \
+      "$file" "$ready_file" "$WRITER_SIGNAL_LOG" "$WRITER_CLOSE_TRIGGER"
+  ) &
+  WRITER_PID=$!
+  WRITER_PIDS+=("$WRITER_PID")
+
+  local attempt
+  for attempt in {1..100}; do
+    if [[ -s "$ready_file" ]] && kill -0 "$WRITER_PID" 2>/dev/null; then
+      return
+    fi
+    sleep 0.02
+  done
+  fail "fake writer did not become ready: $WRITER_PID"
+}
+
+assert_writer_alive_without_sigterm() {
+  local pid="$1"
+  local signal_log="$2"
+  kill -0 "$pid" 2>/dev/null || fail "writer exited unexpectedly: $pid"
+  [[ ! -s "$signal_log" ]] || fail "writer received SIGTERM unexpectedly: $pid"
+}
+
+stop_fake_writer() {
+  local pid="$1"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  forget_fake_writer "$pid"
+}
+
+forget_fake_writer() {
+  local target_pid="$1"
+  local writer_pid
+  local remaining=()
+  for writer_pid in "${WRITER_PIDS[@]}"; do
+    if [[ "$writer_pid" != "$target_pid" ]]; then
+      remaining+=("$writer_pid")
+    fi
+  done
+  WRITER_PIDS=("${remaining[@]}")
 }
 
 assert_fake_calls() {
@@ -353,7 +465,7 @@ start_identity_mutation_during_confirmation() {
 case_a_file="$(write_session sessions "$uuid_a" "$uuid_a" "2026-07-20T00:00:01" "case A later parent metadata")"
 append_parent_meta "$case_a_file" "$uuid_b" "2026-07-20T00:00:01"
 write_subagent_with_parent_meta "$uuid_c" "$uuid_d" "2026-07-20T00:00:02" "case B subagent parent metadata"
-write_session sessions "$uuid_e" "$uuid_f" "2026-07-20T00:00:03" "case C mismatched ids" >/dev/null
+case_c_file="$(write_session sessions "$uuid_e" "$uuid_f" "2026-07-20T00:00:03" "case C mismatched ids")"
 write_no_filename_uuid "$uuid_g" "2026-07-20T00:00:04" "case D missing filename uuid"
 write_session_missing_payload_id "$uuid_h" "2026-07-20T00:00:05" "case E missing payload id"
 case_f_file="$(write_session sessions "$uuid_i" "$uuid_i" "2026-07-20T00:00:06" "case F malformed later line")"
@@ -418,6 +530,125 @@ multi_unarchive_two_file="$(write_session archived_sessions "$uuid_ae" "$uuid_ae
 batch_second_file="$(write_session sessions "$uuid_ag" "$uuid_ag" "2026-07-20T00:02:05" "case Q batch recheck second")"
 batch_first_file="$(write_session sessions "$uuid_af" "$uuid_af" "2026-07-20T00:02:06" "case Q batch recheck first")"
 force_delete_file="$(write_session sessions "$uuid_ai" "$uuid_ai" "2026-07-20T00:02:07" "case R force delete target")"
+writer_success_file="$(write_session sessions "$uuid_aj" "$uuid_aj" "2026-07-20T00:03:01" "case Writer recovery success")"
+writer_wrong_confirmation_file="$(write_session sessions "$uuid_ak" "$uuid_ak" "2026-07-20T00:03:02" "case Writer wrong confirmation")"
+writer_multi_one_file="$(write_session sessions "$uuid_al" "$uuid_al" "2026-07-20T00:03:03" "case Writer multiple selection one")"
+writer_multi_two_file="$(write_session sessions "$uuid_am" "$uuid_am" "2026-07-20T00:03:04" "case Writer multiple selection two")"
+writer_no_holder_file="$(write_session sessions "$uuid_an" "$uuid_an" "2026-07-20T00:03:05" "case Writer no local holder")"
+writer_unrecognized_file="$(write_session sessions "$uuid_ao" "$uuid_ao" "2026-07-20T00:03:06" "case Writer unrecognized holder")"
+writer_fd_disappears_file="$(write_session sessions "$uuid_ap" "$uuid_ap" "2026-07-20T00:03:07" "case Writer FD disappears during confirmation")"
+writer_identity_changes_file="$(write_session sessions "$uuid_aq" "$uuid_aq" "2026-07-20T00:03:08" "case Writer file identity changes during confirmation")"
+writer_archived_file="$(write_session archived_sessions "$uuid_ar" "$uuid_ar" "2026-07-20T00:03:09" "case Writer archived session")"
+writer_multiple_holders_file="$(write_session sessions "$uuid_as" "$uuid_as" "2026-07-20T00:03:10" "case Writer multiple Codex holders")"
+
+# Writer recovery always uses a same-user fixture process. It never opens the
+# user's CODEX_HOME or a real Codex process.
+writer_success_digest="$(sha256sum "$writer_success_file")"
+start_fake_writer "$writer_success_file" codex
+writer_success_pid="$WRITER_PID"
+writer_success_signal_log="$WRITER_SIGNAL_LOG"
+run_tui "/case Writer recovery success\nxTERMINATE WRITER $uuid_aj $writer_success_pid\nq" "$TMP_DIR/writer-success.log"
+for writer_wait_attempt in {1..100}; do
+  if ! kill -0 "$writer_success_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.02
+done
+if kill -0 "$writer_success_pid" 2>/dev/null; then
+  clean_log "$TMP_DIR/writer-success.log" >&2
+  fail 'writer recovery did not terminate the fake Codex writer'
+fi
+wait "$writer_success_pid"
+forget_fake_writer "$writer_success_pid"
+assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "Required input: TERMINATE WRITER $uuid_aj $writer_success_pid"
+assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "Writer recovery succeeded"
+assert_contains "$(cat "$writer_success_signal_log")" 'SIGTERM'
+[[ -e "$writer_success_file" ]] || fail 'writer recovery changed the transcript file'
+[[ "$(sha256sum "$writer_success_file")" == "$writer_success_digest" ]] || \
+  fail 'writer recovery modified the transcript content'
+
+start_fake_writer "$writer_wrong_confirmation_file" codex
+writer_wrong_pid="$WRITER_PID"
+writer_wrong_signal_log="$WRITER_SIGNAL_LOG"
+run_tui "/case Writer wrong confirmation\nxWRONG\nq" "$TMP_DIR/writer-wrong-confirmation.log"
+assert_writer_alive_without_sigterm "$writer_wrong_pid" "$writer_wrong_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-wrong-confirmation.log")" "Writer recovery cancelled"
+stop_fake_writer "$writer_wrong_pid"
+
+start_fake_writer "$case_c_file" codex
+writer_unsafe_pid="$WRITER_PID"
+writer_unsafe_signal_log="$WRITER_SIGNAL_LOG"
+run_tui "/case C mismatched ids\nx\nq" "$TMP_DIR/writer-unsafe-identity.log"
+assert_writer_alive_without_sigterm "$writer_unsafe_pid" "$writer_unsafe_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-unsafe-identity.log")" "Blocked writer recovery"
+stop_fake_writer "$writer_unsafe_pid"
+
+start_fake_writer "$writer_multi_one_file" codex
+writer_multi_pid="$WRITER_PID"
+writer_multi_signal_log="$WRITER_SIGNAL_LOG"
+run_tui "/case Writer multiple selection\nAxq" "$TMP_DIR/writer-multiple-selection.log"
+assert_writer_alive_without_sigterm "$writer_multi_pid" "$writer_multi_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-multiple-selection.log")" "Writer recovery is blocked for multiple selected sessions"
+stop_fake_writer "$writer_multi_pid"
+
+start_fake_writer "$writer_multiple_holders_file" codex
+writer_holder_one_pid="$WRITER_PID"
+writer_holder_one_signal_log="$WRITER_SIGNAL_LOG"
+start_fake_writer "$writer_multiple_holders_file" codex
+writer_holder_two_pid="$WRITER_PID"
+writer_holder_two_signal_log="$WRITER_SIGNAL_LOG"
+run_tui "/case Writer multiple Codex holders\nx\nq" "$TMP_DIR/writer-multiple-holders.log"
+assert_writer_alive_without_sigterm "$writer_holder_one_pid" "$writer_holder_one_signal_log"
+assert_writer_alive_without_sigterm "$writer_holder_two_pid" "$writer_holder_two_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-multiple-holders.log")" "2 Codex writer candidates hold this transcript"
+stop_fake_writer "$writer_holder_one_pid"
+stop_fake_writer "$writer_holder_two_pid"
+
+run_tui "/case Writer no local holder\nxq" "$TMP_DIR/writer-no-holder.log"
+assert_contains "$(clean_log "$TMP_DIR/writer-no-holder.log")" "No local writer holds this transcript"
+[[ -e "$writer_no_holder_file" ]] || fail 'writer diagnostics changed a no-holder transcript'
+
+run_tui "\t/case Writer archived session\nxq" "$TMP_DIR/writer-archived.log"
+assert_contains "$(clean_log "$TMP_DIR/writer-archived.log")" "Writer recovery is available only for active sessions"
+[[ -e "$writer_archived_file" ]] || fail 'writer recovery changed an archived transcript'
+
+start_fake_writer "$writer_unrecognized_file" holder
+writer_unrecognized_pid="$WRITER_PID"
+writer_unrecognized_signal_log="$WRITER_SIGNAL_LOG"
+run_tui "/case Writer unrecognized holder\nx\nq" "$TMP_DIR/writer-unrecognized-holder.log"
+assert_writer_alive_without_sigterm "$writer_unrecognized_pid" "$writer_unrecognized_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-unrecognized-holder.log")" "unrecognized holder (termination blocked)"
+stop_fake_writer "$writer_unrecognized_pid"
+
+start_fake_writer "$writer_fd_disappears_file" codex
+writer_fd_disappears_pid="$WRITER_PID"
+writer_fd_disappears_signal_log="$WRITER_SIGNAL_LOG"
+(
+  sleep 4
+  : > "$WRITER_CLOSE_TRIGGER"
+) &
+writer_close_mutator_pid=$!
+run_tui "/case Writer FD disappears during confirmation\nxTERMINATE WRITER $uuid_ap $writer_fd_disappears_pid\nq" "$TMP_DIR/writer-fd-disappears.log"
+wait "$writer_close_mutator_pid"
+wait "$writer_fd_disappears_pid"
+forget_fake_writer "$writer_fd_disappears_pid"
+[[ ! -s "$writer_fd_disappears_signal_log" ]] || fail 'CSM sent SIGTERM after writer FD disappeared'
+assert_contains "$(clean_log "$TMP_DIR/writer-fd-disappears.log")" "PID $writer_fd_disappears_pid exited before SIGTERM"
+
+start_fake_writer "$writer_identity_changes_file" codex
+writer_identity_changes_pid="$WRITER_PID"
+writer_identity_changes_signal_log="$WRITER_SIGNAL_LOG"
+(
+  sleep 5.3
+  cp -- "$writer_identity_changes_file" "$writer_identity_changes_file.next"
+  mv -- "$writer_identity_changes_file.next" "$writer_identity_changes_file"
+) &
+writer_identity_mutator_pid=$!
+run_tui "/case Writer file identity changes during confirmation\nxTERMINATE WRITER $uuid_aq $writer_identity_changes_pid\nq" "$TMP_DIR/writer-identity-changes.log"
+wait "$writer_identity_mutator_pid"
+assert_writer_alive_without_sigterm "$writer_identity_changes_pid" "$writer_identity_changes_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-identity-changes.log")" "target dev/inode changed before SIGTERM"
+stop_fake_writer "$writer_identity_changes_pid"
 
 run_tui "/case G archive target\nbq" "$TMP_DIR/archive.log"
 assert_fake_calls "archive $uuid_l"
