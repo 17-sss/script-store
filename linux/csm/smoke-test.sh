@@ -709,10 +709,12 @@ assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_o"
 assert_quarantined_file "$multi_two_file" "$uuid_p"
 assert_quarantined_file "$multi_one_file" "$uuid_o"
 
-# Quarantine browsing and restore use only isolated fixture JSONLs. Restore is
-# single-session, requires the full UUID, and never invokes the Codex CLI.
+# Quarantine browsing and restore use only isolated fixture JSONLs. Restore
+# requires every full UUID and never invokes the Codex CLI.
 restore_success_digest="$(sha256sum "$restore_success_file")"
 restore_archived_digest="$(sha256sum "$restore_archived_file")"
+restore_multi_one_digest="$(sha256sum "$restore_multi_one_file")"
+restore_multi_two_digest="$(sha256sum "$restore_multi_two_file")"
 run_tui "/case S restore\nAdQUARANTINE $uuid_az $uuid_ay $uuid_ax $uuid_aw $uuid_av $uuid_au $uuid_at\nq" "$TMP_DIR/restore-fixture-quarantine.log"
 assert_no_fake_calls
 assert_quarantined_file "$restore_success_file" "$uuid_at"
@@ -770,20 +772,29 @@ if ('quarantine' in data) {
 }
 NODE
 
-run_tui "\t\t/case S restore multi\nAuq" "$TMP_DIR/restore-multiple-selection.log"
-assert_contains "$(clean_log "$TMP_DIR/restore-multiple-selection.log")" "Restore is blocked for multiple selected sessions"
-assert_quarantined_file "$restore_multi_one_file" "$uuid_av"
-assert_quarantined_file "$restore_multi_two_file" "$uuid_aw"
+run_tui "\t\t/case S restore multi\nAuRESTORE $uuid_aw $uuid_av\nq" "$TMP_DIR/restore-multiple-selection.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/restore-multiple-selection.log")" "Required input: RESTORE $uuid_aw $uuid_av"
+assert_contains "$(clean_log "$TMP_DIR/restore-multiple-selection.log")" "Restored 2 sessions (2 active)"
+[[ -e "$restore_multi_one_file" ]] || fail 'same-batch multi restore did not recreate the first original path'
+[[ -e "$restore_multi_two_file" ]] || fail 'same-batch multi restore did not recreate the second original path'
+[[ "$(sha256sum "$restore_multi_one_file")" == "$restore_multi_one_digest" ]] || fail 'same-batch multi restore modified the first transcript'
+[[ "$(sha256sum "$restore_multi_two_file")" == "$restore_multi_two_digest" ]] || fail 'same-batch multi restore modified the second transcript'
+assert_not_quarantined "$restore_multi_one_file"
+assert_not_quarantined "$restore_multi_two_file"
+if find "$QUARANTINE_ROOT" -type f -name '.restore.lock' -print -quit | grep -q .; then
+  fail 'successful same-batch multi restore left a batch lock behind'
+fi
 
 run_tui "\t\t/case S restore wrong confirmation\nuWRONG\nq" "$TMP_DIR/restore-wrong-confirmation.log"
 assert_contains "$(clean_log "$TMP_DIR/restore-wrong-confirmation.log")" "Restore cancelled"
 assert_quarantined_file "$restore_wrong_file" "$uuid_au"
 
-restore_lock_batch="$(quarantine_batch_dir "$restore_multi_one_file")"
+restore_lock_batch="$(quarantine_batch_dir "$restore_wrong_file")"
 printf '{"fixture":"active restore"}\n' > "$restore_lock_batch/.restore.lock"
-run_tui "\t\t/case S restore multi one\nuRESTORE $uuid_av\nq" "$TMP_DIR/restore-batch-lock.log"
+run_tui "\t\t/case S restore wrong confirmation\nuRESTORE $uuid_au\nq" "$TMP_DIR/restore-batch-lock.log"
 assert_contains "$(clean_log "$TMP_DIR/restore-batch-lock.log")" "another CSM restore is active for this quarantine batch"
-assert_quarantined_file "$restore_multi_one_file" "$uuid_av"
+assert_quarantined_file "$restore_wrong_file" "$uuid_au"
 rm -f -- "$restore_lock_batch/.restore.lock"
 
 printf 'collision fixture\n' > "$restore_collision_file"
@@ -800,6 +811,11 @@ assert_contains "$(clean_log "$TMP_DIR/restore-unsafe-identity.log")" "Blocked r
 [[ ! -e "$restore_unsafe_file" ]] || fail 'unsafe quarantined transcript was restored'
 assert_quarantined_file "$restore_unsafe_file" "$uuid_ax"
 
+run_tui "\t\t/case S restore\nAu\nq" "$TMP_DIR/restore-multi-unsafe.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-multi-unsafe.log")" "Blocked restore"
+[[ ! -e "$restore_success_file" ]] || fail 'multi restore partially restored a safe transcript beside an unsafe target'
+assert_quarantined_file "$restore_success_file" "$uuid_at"
+
 restore_toctou_quarantined="$(quarantined_path "$restore_toctou_file")"
 start_identity_mutation_during_confirmation "$restore_toctou_quarantined" "$uuid_az" "$uuid_b"
 run_tui "\t\t/case S restore TOCTOU identity\nuRESTORE $uuid_az\n\nq" "$TMP_DIR/restore-toctou.log"
@@ -808,23 +824,36 @@ assert_contains "$(clean_log "$TMP_DIR/restore-toctou.log")" "Blocked restore"
 [[ ! -e "$restore_toctou_file" ]] || fail 'changed quarantined transcript was restored'
 assert_quarantined_file "$restore_toctou_file" "$uuid_az"
 
-run_tui "\t\t/case S restore active success\nuRESTORE $uuid_at\nq" "$TMP_DIR/restore-active-success.log"
+restore_active_batch="$(quarantine_batch_dir "$restore_success_file")"
+restore_archived_batch="$(quarantine_batch_dir "$restore_archived_file")"
+if [[ "$restore_active_batch" < "$restore_archived_batch" ]]; then
+  restore_first_lock_batch="$restore_active_batch"
+  restore_blocked_lock_batch="$restore_archived_batch"
+else
+  restore_first_lock_batch="$restore_archived_batch"
+  restore_blocked_lock_batch="$restore_active_batch"
+fi
+printf '{"fixture":"cross-batch restore"}\n' > "$restore_blocked_lock_batch/.restore.lock"
+run_tui "\t\t/case S restore a\nAuRESTORE $uuid_ba $uuid_at\nq" "$TMP_DIR/restore-cross-batch-lock.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-cross-batch-lock.log")" "another CSM restore is active for this quarantine batch"
+assert_quarantined_file "$restore_success_file" "$uuid_at"
+assert_quarantined_file "$restore_archived_file" "$uuid_ba"
+[[ ! -e "$restore_first_lock_batch/.restore.lock" ]] || fail 'cross-batch lock contention left the earlier acquired lock behind'
+rm -f -- "$restore_blocked_lock_batch/.restore.lock"
+
+run_tui "\t\t/case S restore a\nAuRESTORE $uuid_ba $uuid_at\nq" "$TMP_DIR/restore-cross-batch-success.log"
 assert_no_fake_calls
-assert_contains "$(clean_log "$TMP_DIR/restore-active-success.log")" "Required input: RESTORE $uuid_at"
-assert_contains "$(clean_log "$TMP_DIR/restore-active-success.log")" "Restored $uuid_at to active"
+assert_contains "$(clean_log "$TMP_DIR/restore-cross-batch-success.log")" "Required input: RESTORE $uuid_ba $uuid_at"
+assert_contains "$(clean_log "$TMP_DIR/restore-cross-batch-success.log")" "Restored 2 sessions (1 active, 1 archived)"
 [[ -e "$restore_success_file" ]] || fail 'active quarantine restore did not recreate the original path'
 [[ "$(sha256sum "$restore_success_file")" == "$restore_success_digest" ]] || fail 'active quarantine restore modified transcript contents'
 assert_not_quarantined "$restore_success_file"
-if find "$QUARANTINE_ROOT" -type f -name '.restore.lock' -print -quit | grep -q .; then
-  fail 'successful restore left a batch lock behind'
-fi
-
-run_tui "\t\t/case S restore archived success\nuRESTORE $uuid_ba\nq" "$TMP_DIR/restore-archived-success.log"
-assert_no_fake_calls
-assert_contains "$(clean_log "$TMP_DIR/restore-archived-success.log")" "Restored $uuid_ba to archived"
 [[ -e "$restore_archived_file" ]] || fail 'archived quarantine restore did not recreate the original path'
 [[ "$(sha256sum "$restore_archived_file")" == "$restore_archived_digest" ]] || fail 'archived quarantine restore modified transcript contents'
 assert_not_quarantined "$restore_archived_file"
+if find "$QUARANTINE_ROOT" -type f -name '.restore.lock' -print -quit | grep -q .; then
+  fail 'successful cross-batch multi restore left a batch lock behind'
+fi
 
 run_tui "/case O multi archive\nAbq" "$TMP_DIR/multi-archive.log"
 assert_fake_calls $'archive '"$uuid_ac"$'\narchive '"$uuid_ab"
