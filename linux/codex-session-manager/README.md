@@ -27,6 +27,8 @@ repo 루트에서 실행:
 
 기본 화면은 **현재 실행한 폴더와 그 하위 폴더에서 열린 Codex 세션**만 보여줍니다. 전체 로컬 세션을 보고 싶으면 TUI 안에서 `a`를 누르세요.
 
+목록 제목은 Codex에서 rename한 세션 이름을 우선 표시합니다. 이름이 없으면 초기 prompt를 대신 표시하며, 하단 상세에는 rename 이름과 초기 prompt를 모두 표시합니다.
+
 ## 화면 읽는 법
 
 상단 상태줄은 이런 형태입니다.
@@ -150,7 +152,10 @@ CODEX_HOME=/tmp/example-codex ./codex-session-manager.js --list all --all
 ```txt
 $CODEX_HOME/sessions
 $CODEX_HOME/archived_sessions
+$CODEX_HOME/state_5.sqlite
 ```
+
+`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. 이 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 기존처럼 초기 prompt를 표시합니다.
 
 기본 `CODEX_HOME`은 `~/.codex`입니다.
 

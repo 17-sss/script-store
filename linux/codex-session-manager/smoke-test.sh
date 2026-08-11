@@ -190,6 +190,18 @@ JSONL
   printf '%s\n' "$file"
 }
 
+write_thread_title() {
+  local session_id="$1"
+  local title="$2"
+  SESSION_ID="$session_id" THREAD_TITLE="$title" DATABASE_PATH="$TEST_CODEX_HOME/state_5.sqlite" node --no-warnings <<'NODE'
+const {DatabaseSync} = require('node:sqlite');
+const database = new DatabaseSync(process.env.DATABASE_PATH);
+database.exec('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, title TEXT NOT NULL)');
+database.prepare('INSERT OR REPLACE INTO threads (id, title) VALUES (?, ?)').run(process.env.SESSION_ID, process.env.THREAD_TITLE);
+database.close();
+NODE
+}
+
 assert_json_entry() {
   local json="$1"
   local prompt="$2"
@@ -340,9 +352,11 @@ printf '{bad json\n' >> "$case_f_file"
 write_session sessions "${uuid_j^^}" "$uuid_j" "2026-07-20T00:00:07" "case K uppercase filename id" >/dev/null
 terminal_control_file="$(write_session_with_terminal_controls "$uuid_u" "2026-07-20T00:00:08")"
 write_non_rollout_filename "$uuid_aa" "2026-07-20T00:00:09" "case N non rollout filename"
+write_thread_title "$uuid_a" "case A renamed title"
 
 json_output="$(isolated_env "$SCRIPT_DIR/codex-session-manager.js" --cwd "$PROJECT_CWD" --list all --json)"
 assert_json_entry "$json_output" "case A later parent metadata" "entry.id === '$uuid_a' && entry.mutationSafe === true"
+assert_json_entry "$json_output" "case A later parent metadata" "entry.title === 'case A renamed title'"
 assert_json_entry "$json_output" "case B subagent parent metadata" "entry.id === '$uuid_c' && entry.mutationSafe === true"
 assert_json_entry "$json_output" "case C mismatched ids" "entry.mutationSafe === false && /mismatch/i.test(entry.unsafeReason || '')"
 assert_json_entry "$json_output" "case D missing filename uuid" "entry.mutationSafe === false && /filename/i.test(entry.unsafeReason || '')"
@@ -354,10 +368,16 @@ assert_json_entry "$json_output" "case N non rollout filename" "entry.mutationSa
 
 list_output="$(isolated_env "$SCRIPT_DIR/codex-session-manager.js" --cwd "$PROJECT_CWD" --list all)"
 assert_contains "$list_output" "unsafe:"
+assert_contains "$list_output" "case A renamed title"
 if LC_ALL=C grep -q "$(printf '\033')" <<< "$list_output"; then
   printf 'plain list output contains a terminal escape from transcript data\n' >&2
   exit 1
 fi
+
+run_tui "/case A renamed title\nq" "$TMP_DIR/renamed-title.log"
+renamed_title_log="$(clean_log "$TMP_DIR/renamed-title.log")"
+assert_contains "$renamed_title_log" "name: case A renamed title"
+assert_contains "$renamed_title_log" "prompt: case A later parent metadata"
 
 if ! command -v script >/dev/null 2>&1; then
   printf 'script command is required; refusing to skip TUI mutation safety tests\n' >&2

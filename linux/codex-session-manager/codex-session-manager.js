@@ -876,9 +876,11 @@ function render(state) {
     lines.push(truncate(`id: ${selected.id}  safety: ${safety}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
     lines.push(truncate(`cwd: ${selected.cwd || '(unknown)'}`, width));
     lines.push(truncate(`file: ${sanitizeTerminalText(selected.file)}`, width));
+    lines.push(truncate(`name: ${selected.title || '(no renamed name)'}`, width));
     lines.push(truncate(`prompt: ${selected.summary}`, width));
   } else {
     lines.push('No sessions in this view.');
+    lines.push('');
     lines.push('');
     lines.push('');
     lines.push('');
@@ -911,7 +913,7 @@ function statusColor(status) {
 
 function listHeight() {
   const rows = process.stdout.rows || 30;
-  return Math.max(1, rows - 9);
+  return Math.max(1, rows - 10);
 }
 
 function writeFrame(lines, rows) {
@@ -1010,6 +1012,7 @@ function applyFilters(entries, options, query = '') {
       entry.canonicalId,
       entry.cwd,
       entry.source,
+      entry.title,
       entry.summary,
       entry.file,
       entry.unsafeReason,
@@ -1019,15 +1022,16 @@ function applyFilters(entries, options, query = '') {
 }
 
 function loadInventory(options) {
+  const titles = loadThreadTitles(options.codexHome);
   return {
-    active: loadEntries(sessionsDir(options), 'active'),
-    archived: loadEntries(archivedDir(options), 'archived'),
+    active: loadEntries(sessionsDir(options), 'active', titles),
+    archived: loadEntries(archivedDir(options), 'archived', titles),
   };
 }
 
-function loadEntries(root, state) {
+function loadEntries(root, state, titles) {
   return walkJsonl(root)
-    .map((file) => readEntry(file, state))
+    .map((file) => readEntry(file, state, titles))
     .filter(Boolean)
     .sort((left, right) => right.time - left.time || left.file.localeCompare(right.file));
 }
@@ -1061,7 +1065,7 @@ function walkJsonl(root) {
   return files;
 }
 
-function readEntry(file, state) {
+function readEntry(file, state, titles = new Map()) {
   const stat = safeStat(file);
   const preview = safeReadPreview(file);
   const filenameId = extractFilenameUuid(file);
@@ -1074,7 +1078,7 @@ function readEntry(file, state) {
 
   if (!preview.ok) {
     const identity = unsafeIdentity(filenameId, '', `transcript could not be read: ${preview.error}`);
-    return buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname});
+    return buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname, title: ''});
   }
 
   const lines = preview.text.split(/\r?\n/);
@@ -1108,10 +1112,22 @@ function readEntry(file, state) {
     }
   }
 
-  return buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname});
+  return buildEntry({
+    file,
+    state,
+    identity,
+    timestamp,
+    cwd,
+    source,
+    summary,
+    role,
+    nickname,
+    // A title is only trusted when the transcript's canonical ID is safe.
+    title: identity.canonicalId ? titles.get(identity.canonicalId) || '' : '',
+  });
 }
 
-function buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname}) {
+function buildEntry({file, state, identity, timestamp, cwd, source, summary, role, nickname, title}) {
   if (!source) {
     source = role || nickname ? `subagent/${role || 'agent'}${nickname ? `/${nickname}` : ''}` : 'unknown';
   }
@@ -1126,9 +1142,46 @@ function buildEntry({file, state, identity, timestamp, cwd, source, summary, rol
     file,
     cwd: sanitizeTerminalText(cwd),
     source: sanitizeTerminalText(source),
+    title: sanitizeTerminalText(title),
     summary: sanitizeTerminalText(summary) || '(no prompt preview)',
     time: timestamp,
   };
+}
+
+function loadThreadTitles(codexHome) {
+  const databasePath = path.join(codexHome, 'state_5.sqlite');
+  if (!fs.existsSync(databasePath)) {
+    return new Map();
+  }
+
+  try {
+    // Codex stores renamed thread names in its local state database. The module
+    // is optional so older Node versions still retain prompt-only listing.
+    const emitWarning = process.emitWarning;
+    process.emitWarning = function suppressSqliteExperimentalWarning(warning, type, ...args) {
+      if (type === 'ExperimentalWarning' && String(warning).includes('SQLite')) {
+        return;
+      }
+      return emitWarning.call(process, warning, type, ...args);
+    };
+    let DatabaseSync;
+    try {
+      ({DatabaseSync} = require('node:sqlite'));
+    } finally {
+      process.emitWarning = emitWarning;
+    }
+    const database = new DatabaseSync(databasePath, {readOnly: true});
+    try {
+      const rows = database.prepare('SELECT id, title FROM threads WHERE trim(title) <> \'\'').all();
+      return new Map(rows
+        .filter((row) => normalizeUuid(row.id) && typeof row.title === 'string')
+        .map((row) => [normalizeUuid(row.id), row.title]));
+    } finally {
+      database.close();
+    }
+  } catch {
+    return new Map();
+  }
 }
 
 function safeReadPreview(file) {
@@ -1371,7 +1424,7 @@ function formatPlainLine(entry, cwd) {
     entry.mutationSafe ? '[safe]' : `[unsafe: ${entry.unsafeReason}]`,
     `[${entry.source}]`,
     relativePath(entry.cwd, cwd),
-    entry.summary,
+    entry.title || entry.summary,
   ].join('  ');
 }
 
@@ -1384,7 +1437,7 @@ function formatTuiLine(entry, cwd, width, selected) {
     entry.id.slice(0, 8),
     fixed(entry.source, 18),
     fixed(relativePath(entry.cwd, cwd), 32),
-    entry.mutationSafe ? entry.summary : `unsafe: ${entry.unsafeReason}`,
+    entry.mutationSafe ? entry.title || entry.summary : `unsafe: ${entry.unsafeReason}`,
   ];
   return truncate(fields.join('  '), width);
 }
