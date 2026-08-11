@@ -169,6 +169,14 @@ uuid_ap="019f1000-0000-7000-8000-000000000042"
 uuid_aq="019f1000-0000-7000-8000-000000000043"
 uuid_ar="019f1000-0000-7000-8000-000000000044"
 uuid_as="019f1000-0000-7000-8000-000000000045"
+uuid_at="019f1000-0000-7000-8000-000000000046"
+uuid_au="019f1000-0000-7000-8000-000000000047"
+uuid_av="019f1000-0000-7000-8000-000000000048"
+uuid_aw="019f1000-0000-7000-8000-000000000049"
+uuid_ax="019f1000-0000-7000-8000-000000000050"
+uuid_ay="019f1000-0000-7000-8000-000000000051"
+uuid_az="019f1000-0000-7000-8000-000000000052"
+uuid_ba="019f1000-0000-7000-8000-000000000053"
 
 write_session() {
   local area="$1"
@@ -270,7 +278,7 @@ assert_json_entry() {
   local expression="$3"
   JSON_INPUT="$json" PROMPT="$prompt" EXPRESSION="$expression" node <<'NODE'
 const data = JSON.parse(process.env.JSON_INPUT);
-const entries = [...(data.active || []), ...(data.archived || [])];
+const entries = [...(data.active || []), ...(data.archived || []), ...(data.quarantine || [])];
 const entry = entries.find((item) => item.summary === process.env.PROMPT);
 if (!entry) {
   throw new Error(`missing entry for prompt: ${process.env.PROMPT}`);
@@ -442,6 +450,17 @@ if (path.join(process.env.QUARANTINE_ROOT, batch, item.storedRelativePath) !== p
 NODE
 }
 
+quarantined_path() {
+  local source="$1"
+  local found
+  found="$(find "$QUARANTINE_ROOT" -type f -name "$(basename -- "$source")" -print)"
+  if [[ -z "$found" || "$(wc -l <<< "$found")" -ne 1 ]]; then
+    printf 'expected exactly one quarantined copy for %s, got:\n%s\n' "$source" "$found" >&2
+    exit 1
+  fi
+  printf '%s\n' "$found"
+}
+
 assert_not_quarantined() {
   local source="$1"
   if [[ -d "$QUARANTINE_ROOT" ]] && find "$QUARANTINE_ROOT" -type f -name "$(basename -- "$source")" -print -quit | grep -q .; then
@@ -540,6 +559,14 @@ writer_fd_disappears_file="$(write_session sessions "$uuid_ap" "$uuid_ap" "2026-
 writer_identity_changes_file="$(write_session sessions "$uuid_aq" "$uuid_aq" "2026-07-20T00:03:08" "case Writer file identity changes during confirmation")"
 writer_archived_file="$(write_session archived_sessions "$uuid_ar" "$uuid_ar" "2026-07-20T00:03:09" "case Writer archived session")"
 writer_multiple_holders_file="$(write_session sessions "$uuid_as" "$uuid_as" "2026-07-20T00:03:10" "case Writer multiple Codex holders")"
+restore_success_file="$(write_session sessions "$uuid_at" "$uuid_at" "2026-07-20T00:04:01" "case S restore active success")"
+restore_wrong_file="$(write_session sessions "$uuid_au" "$uuid_au" "2026-07-20T00:04:02" "case S restore wrong confirmation")"
+restore_multi_one_file="$(write_session sessions "$uuid_av" "$uuid_av" "2026-07-20T00:04:03" "case S restore multi one")"
+restore_multi_two_file="$(write_session sessions "$uuid_aw" "$uuid_aw" "2026-07-20T00:04:04" "case S restore multi two")"
+restore_unsafe_file="$(write_session sessions "$uuid_ax" "$uuid_ax" "2026-07-20T00:04:05" "case S restore unsafe identity")"
+restore_collision_file="$(write_session sessions "$uuid_ay" "$uuid_ay" "2026-07-20T00:04:06" "case S restore target collision")"
+restore_toctou_file="$(write_session sessions "$uuid_az" "$uuid_az" "2026-07-20T00:04:07" "case S restore TOCTOU identity")"
+restore_archived_file="$(write_session archived_sessions "$uuid_ba" "$uuid_ba" "2026-07-20T00:04:08" "case S restore archived success")"
 
 # Writer recovery always uses a same-user fixture process. It never opens the
 # user's CODEX_HOME or a real Codex process.
@@ -669,6 +696,91 @@ assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_p"
 assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_o"
 assert_quarantined_file "$multi_two_file" "$uuid_p"
 assert_quarantined_file "$multi_one_file" "$uuid_o"
+
+# Quarantine browsing and restore use only isolated fixture JSONLs. Restore is
+# single-session, requires the full UUID, and never invokes the Codex CLI.
+restore_success_digest="$(sha256sum "$restore_success_file")"
+restore_archived_digest="$(sha256sum "$restore_archived_file")"
+run_tui "/case S restore\nAdQUARANTINE $uuid_az $uuid_ay $uuid_ax $uuid_aw $uuid_av $uuid_au $uuid_at\nq" "$TMP_DIR/restore-fixture-quarantine.log"
+assert_no_fake_calls
+assert_quarantined_file "$restore_success_file" "$uuid_at"
+assert_quarantined_file "$restore_wrong_file" "$uuid_au"
+assert_quarantined_file "$restore_multi_one_file" "$uuid_av"
+assert_quarantined_file "$restore_multi_two_file" "$uuid_aw"
+assert_quarantined_file "$restore_unsafe_file" "$uuid_ax"
+assert_quarantined_file "$restore_collision_file" "$uuid_ay"
+assert_quarantined_file "$restore_toctou_file" "$uuid_az"
+
+run_tui "\t/case S restore archived success\ndQUARANTINE $uuid_ba\nq" "$TMP_DIR/restore-archived-quarantine.log"
+assert_no_fake_calls
+assert_quarantined_file "$restore_archived_file" "$uuid_ba"
+
+quarantine_json="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list quarantine --json)"
+assert_json_entry "$quarantine_json" "case S restore active success" \
+  "entry.state === 'quarantine' && entry.restoreState === 'active' && entry.originalPath === '$restore_success_file' && entry.mutationSafe === true"
+assert_json_entry "$quarantine_json" "case S restore archived success" \
+  "entry.state === 'quarantine' && entry.restoreState === 'archived' && entry.originalPath === '$restore_archived_file' && entry.mutationSafe === true"
+
+all_with_quarantine_json="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all --json)"
+JSON_INPUT="$all_with_quarantine_json" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+if (!Array.isArray(data.quarantine) || data.quarantine.length === 0) {
+  throw new Error('normal --list all did not include quarantined sessions');
+}
+NODE
+force_all_json="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all --json --force)"
+JSON_INPUT="$force_all_json" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+if ('quarantine' in data) {
+  throw new Error('--force unexpectedly exposed a quarantine view');
+}
+NODE
+
+run_tui "\t\t/case S restore multi\nAuq" "$TMP_DIR/restore-multiple-selection.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-multiple-selection.log")" "Restore is blocked for multiple selected sessions"
+assert_quarantined_file "$restore_multi_one_file" "$uuid_av"
+assert_quarantined_file "$restore_multi_two_file" "$uuid_aw"
+
+run_tui "\t\t/case S restore wrong confirmation\nuWRONG\nq" "$TMP_DIR/restore-wrong-confirmation.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-wrong-confirmation.log")" "Restore cancelled"
+assert_quarantined_file "$restore_wrong_file" "$uuid_au"
+
+printf 'collision fixture\n' > "$restore_collision_file"
+run_tui "\t\t/case S restore target collision\nu\nq" "$TMP_DIR/restore-target-collision.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-target-collision.log")" "restore target already exists"
+[[ "$(cat "$restore_collision_file")" == 'collision fixture' ]] || fail 'restore overwrote its collision target'
+quarantined_path "$restore_collision_file" >/dev/null
+
+restore_unsafe_quarantined="$(quarantined_path "$restore_unsafe_file")"
+sed "1s/$uuid_ax/$uuid_a/" "$restore_unsafe_quarantined" > "$restore_unsafe_quarantined.next"
+mv -- "$restore_unsafe_quarantined.next" "$restore_unsafe_quarantined"
+run_tui "\t\t/case S restore unsafe identity\nu\nq" "$TMP_DIR/restore-unsafe-identity.log"
+assert_contains "$(clean_log "$TMP_DIR/restore-unsafe-identity.log")" "Blocked restore"
+[[ ! -e "$restore_unsafe_file" ]] || fail 'unsafe quarantined transcript was restored'
+assert_quarantined_file "$restore_unsafe_file" "$uuid_ax"
+
+restore_toctou_quarantined="$(quarantined_path "$restore_toctou_file")"
+start_identity_mutation_during_confirmation "$restore_toctou_quarantined" "$uuid_az" "$uuid_b"
+run_tui "\t\t/case S restore TOCTOU identity\nuRESTORE $uuid_az\n\nq" "$TMP_DIR/restore-toctou.log"
+wait "$MUTATOR_PID"
+assert_contains "$(clean_log "$TMP_DIR/restore-toctou.log")" "Blocked restore"
+[[ ! -e "$restore_toctou_file" ]] || fail 'changed quarantined transcript was restored'
+assert_quarantined_file "$restore_toctou_file" "$uuid_az"
+
+run_tui "\t\t/case S restore active success\nuRESTORE $uuid_at\nq" "$TMP_DIR/restore-active-success.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/restore-active-success.log")" "Required input: RESTORE $uuid_at"
+assert_contains "$(clean_log "$TMP_DIR/restore-active-success.log")" "Restored $uuid_at to active"
+[[ -e "$restore_success_file" ]] || fail 'active quarantine restore did not recreate the original path'
+[[ "$(sha256sum "$restore_success_file")" == "$restore_success_digest" ]] || fail 'active quarantine restore modified transcript contents'
+assert_not_quarantined "$restore_success_file"
+
+run_tui "\t\t/case S restore archived success\nuRESTORE $uuid_ba\nq" "$TMP_DIR/restore-archived-success.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/restore-archived-success.log")" "Restored $uuid_ba to archived"
+[[ -e "$restore_archived_file" ]] || fail 'archived quarantine restore did not recreate the original path'
+[[ "$(sha256sum "$restore_archived_file")" == "$restore_archived_digest" ]] || fail 'archived quarantine restore modified transcript contents'
+assert_not_quarantined "$restore_archived_file"
 
 run_tui "/case O multi archive\nAbq" "$TMP_DIR/multi-archive.log"
 assert_fake_calls $'archive '"$uuid_ac"$'\narchive '"$uuid_ab"

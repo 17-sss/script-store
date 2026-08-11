@@ -1,6 +1,6 @@
 # csm
 
-Codex 로컬 세션을 TUI에서 찾고, 선택해서 보관/보관취소/격리/영구 삭제하는 도구입니다.
+Codex 로컬 세션을 TUI에서 찾고, 선택해서 보관/보관취소/격리/격리 복원/영구 삭제하는 도구입니다.
 
 Codex CLI는 `resume`, `archive`, `delete`, `unarchive`는 제공하지만, 현재 로컬 active/archived 세션을 한 번에 사람이 보기 좋게 출력하는 `list` 명령은 없습니다. 이 스크립트는 로컬 transcript 파일을 읽어서 목록을 보여줍니다. 보관/보관취소는 공식 `codex` CLI에 위임하고, 삭제는 다른 세션으로 연쇄되지 않도록 선택한 transcript 파일만 정확히 처리합니다.
 
@@ -56,21 +56,21 @@ repo 루트에서 실행:
 csm | View: active | Scope: current folder | Marked: 0 | Sessions: 3
 ```
 
-- `View`: `active`는 일반 세션, `archived`는 아카이브된 세션입니다.
+- `View`: `active`는 일반 세션, `archived`는 아카이브된 세션, `quarantine`은 CSM이 격리한 세션입니다.
 - `Scope`: `current folder`는 현재 폴더 기준, `all folders`는 전체 로컬 세션입니다.
 - `Marked`: 선택한 행 개수입니다.
 - `Sessions`: 현재 화면에 보이는 세션 개수입니다.
 
 ## 기본 사용 흐름
 
-1. `Tab`으로 일반 세션과 아카이브 세션 목록을 전환합니다.
+1. `Tab`으로 일반 세션, 아카이브 세션, 격리 세션 목록을 전환합니다.
 2. `a`로 현재 폴더 기준 목록과 전체 목록을 전환합니다.
 3. 방향키 또는 `j` / `k`로 원하는 세션에 커서를 둡니다.
 4. `Space`로 행을 선택합니다. 여러 개를 선택하면 한 번에 처리할 수 있습니다.
-5. `b`, `u`, `d`로 보관, 보관취소, 격리를 실행합니다.
+5. `b`, `u`, `d`로 보관, 보관취소, 격리를 실행합니다. 격리 화면에서는 `u`로 한 세션만 복원합니다.
 6. active 세션 하나의 writer 점유를 진단하거나 해제해야 할 때만 `x`를 사용합니다.
 
-선택된 행이 하나라도 있으면 `b`, `u`, `d`는 **선택된 행 전체**에 적용됩니다. 선택된 행이 없으면 **현재 커서가 있는 행 하나**에 적용됩니다.
+active/archived 화면에서 선택된 행이 하나라도 있으면 `b`, `u`, `d`는 **선택된 행 전체**에 적용됩니다. 선택된 행이 없으면 **현재 커서가 있는 행 하나**에 적용됩니다. 격리 복원은 초기 버전에서 한 번에 한 세션만 허용하므로 여러 행을 선택하면 차단합니다.
 
 ## 세션 ID 안전 정책
 
@@ -93,7 +93,7 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 | --- | --- |
 | `Up` / `Down` | 커서 이동 |
 | `j` / `k` | 커서 이동 |
-| `Tab` | 일반 세션 / 아카이브 세션 목록 전환 |
+| `Tab` | 일반 세션 / 아카이브 세션 / 격리 세션 목록 전환 |
 | `a` | 현재 폴더 기준 / 전체 폴더 기준 전환 |
 | `/` | 검색 입력 시작 |
 | `Enter` | 검색어 적용 |
@@ -104,7 +104,7 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 | `C` | 선택 전부 해제 |
 | `r` | 현재 active 세션 재개 |
 | `b` | active 세션 보관 |
-| `u` | archived 세션 보관취소 |
+| `u` | archived 세션 보관취소 / quarantined 세션 한 개 복원 |
 | `d` | 세션 격리 (`--force` 실행 시 영구 삭제) |
 | `x` | active 세션 하나의 local writer 진단 / terminate writer recovery |
 | `q` | 종료 |
@@ -146,6 +146,20 @@ QUARANTINE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 여러 개라면 대상 UUID 전체가 뒤에 이어집니다.
 
+### 격리 목록과 복원
+
+일반 모드에서 `Tab`을 두 번 누르면 `quarantine` 화면으로 이동합니다. 이 화면은 완료된 CSM quarantine batch의 `manifest.json`과 실제 보관 JSONL을 함께 검증해 목록을 만듭니다. 격리 당시 active였는지 archived였는지와 원래 경로도 상세 영역에서 확인할 수 있습니다.
+
+복원할 세션 하나에 커서를 두고 `u`를 누른 뒤 다음 정확한 문자열을 입력합니다.
+
+```txt
+RESTORE 019efcef-19e5-7a83-821a-1b3ec9e1716d
+```
+
+복원은 manifest에 기록된 active 또는 archived 원래 경로로 해당 JSONL만 이동합니다. transcript 내용은 수정하지 않으며, 기존 파일이나 심볼릭 링크가 원래 경로에 있으면 덮어쓰지 않고 차단합니다. 여러 세션을 선택한 복원도 차단합니다.
+
+확인 전과 확인 직후에 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 경로나 identity가 바뀌면 아무 파일도 이동하지 않습니다. 성공하면 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
+
 격리 없이 영구 삭제하려면 처음부터 `--force`로 TUI를 실행합니다.
 
 ```bash
@@ -154,6 +168,8 @@ QUARANTINE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 상단의 `Delete: permanent`와 `d=PERMADEL` 표시로 영구 삭제 모드임을 확인할 수 있습니다. 이 모드의 확인 문구는 더 강하게 구분됩니다.
 
+`--force` 모드에서는 실수로 격리 복원과 영구 삭제 문맥을 섞지 않도록 quarantine TUI/list view를 노출하지 않습니다.
+
 ```txt
 FORCE DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 ```
@@ -161,8 +177,6 @@ FORCE DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 확인에는 개수나 짧은 prefix가 아니라 화면에 표시된 대상 UUID 전체를 입력합니다. `Required input:` 뒤의 값을 그대로 입력해야 합니다.
 
 확인 입력 후 대상 파일을 다시 읽어 UUID 안전성을 재검증합니다. 그 사이 ID가 바뀌거나 unsafe 상태가 되면 아무 파일도 변경하지 않고 전체 작업을 차단합니다. 격리는 batch 작업 도중 실패하면 이미 옮긴 파일을 원래 위치로 되돌리려고 시도합니다. 영구 삭제는 재검증을 통과한 선택 대상의 정확한 JSONL 경로만 `unlink`하며, 공식 `codex delete`를 호출하지 않습니다.
-
-격리한 세션을 복구할 때는 해당 batch의 `manifest.json`에서 `originalPath`와 `storedRelativePath`를 확인한 뒤, batch 아래 파일을 원래 경로로 옮기면 됩니다. 복구 전에는 같은 원래 경로에 새 파일이 생기지 않았는지 먼저 확인하세요.
 
 archive와 unarchive도 실행 전에 대상 UUID 목록을 터미널에 표시합니다.
 
@@ -175,9 +189,12 @@ TUI를 열지 않고 목록만 보고 싶을 때 쓸 수 있습니다.
 ```bash
 ./bin/csm --list active
 ./bin/csm --list archived
+./bin/csm --list quarantine
 ./bin/csm --list all --all
 ./bin/csm --list all --json --all
 ```
+
+일반 모드의 `--list all`에는 `quarantine`이 포함됩니다. `--force`의 `--list all`은 active/archived만 출력하며 `--list quarantine --force`는 거부합니다.
 
 테스트나 다른 Codex home을 확인할 때는 `CODEX_HOME`을 바꿀 수 있습니다.
 
@@ -193,6 +210,7 @@ CODEX_HOME=/tmp/example-codex ./bin/csm --list all --all
 $CODEX_HOME/sessions
 $CODEX_HOME/archived_sessions
 $CODEX_HOME/state_5.sqlite
+$XDG_DATA_HOME/csm/quarantine/*/manifest.json
 ```
 
 `state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. 이 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 기존처럼 초기 prompt를 표시합니다.
@@ -214,6 +232,6 @@ codex unarchive <SESSION_UUID>
 ./smoke-test.sh
 ```
 
-테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/영구 삭제도 임시 fixture만 대상으로 확인합니다.
+테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다.
 
 설치 테스트 역시 임시 HOME만 사용하며 실제 `~/.local/bin`, `.bashrc`, `.zshrc`를 변경하지 않습니다.

@@ -87,8 +87,8 @@ function parseArgs(args) {
     } else if (arg === '--list') {
       index += 1;
       options.listMode = requireValue(arg, args[index]);
-      if (!['active', 'archived', 'all'].includes(options.listMode)) {
-        die('--list must be active, archived, or all');
+      if (!['active', 'archived', 'quarantine', 'all'].includes(options.listMode)) {
+        die('--list must be active, archived, quarantine, or all');
       }
     } else {
       die(`unknown option: ${arg}`);
@@ -98,6 +98,9 @@ function parseArgs(args) {
   options.codexHome = normalizePath(options.codexHome);
   options.cwd = normalizePath(options.cwd);
   options.quarantineDir = normalizePath(options.quarantineDir);
+  if (options.forceDelete && options.listMode === 'quarantine') {
+    die('--list quarantine is unavailable with --force');
+  }
   validateQuarantineDir(options);
   return options;
 }
@@ -120,11 +123,11 @@ function printUsage() {
 Usage:
   csm [--all] [--cwd PATH] [--codex-home PATH]
       [--quarantine-dir PATH] [--force]
-  csm --list active|archived|all [--all] [--json]
+  csm --list active|archived|quarantine|all [--all] [--json]
 
 Keys:
   Up/Down or j/k   Move selection
-  Tab              Switch active/archived list
+  Tab              Switch active/archived/quarantine list
   a                Toggle current-cwd/all-cwd filtering
   Space            Toggle selected row
   A                Toggle all visible rows
@@ -132,14 +135,14 @@ Keys:
   /                Search
   r                Resume active session
   b                Archive selected or cursor session
-  u                Unarchive selected or cursor session
+  u                Unarchive or restore selected/cursor session
   d                Quarantine selected or cursor session
   x                Diagnose/terminate one active Codex transcript writer
   R                Refresh
   q                Quit
 
 Notes:
-  Listings are read from $CODEX_HOME/sessions and $CODEX_HOME/archived_sessions.
+  Listings include active, archived, and (without --force) quarantined sessions.
   Archive and unarchive call the official Codex CLI.
   Delete moves only the selected transcript(s) to the quarantine directory.
   Start with --force to permanently delete only the selected transcript(s).
@@ -149,7 +152,7 @@ Notes:
 function printInventory(options) {
   const inventory = loadInventory(options);
   const modes = options.listMode === 'all' || !options.listMode
-    ? ['active', 'archived']
+    ? viewModes(options)
     : [options.listMode];
   const result = {};
 
@@ -172,6 +175,18 @@ function printInventory(options) {
       console.log('');
     }
   }
+}
+
+function viewModes(options) {
+  return options.forceDelete
+    ? ['active', 'archived']
+    : ['active', 'archived', 'quarantine'];
+}
+
+function nextView(current, options) {
+  const modes = viewModes(options);
+  const index = modes.indexOf(current);
+  return modes[(index + 1) % modes.length];
 }
 
 async function startTui(options) {
@@ -230,7 +245,7 @@ async function handleKey(state, key) {
   }
 
   if (key === '\t') {
-    state.view = state.view === 'active' ? 'archived' : 'active';
+    state.view = nextView(state.view, state.options);
     state.cursor = 0;
     state.scroll = 0;
     state.selected.clear();
@@ -348,6 +363,10 @@ function ensureCursorVisible(state) {
 }
 
 async function resumeSelected(state) {
+  if (state.view === 'quarantine') {
+    state.status = 'Restore this session before resuming';
+    return;
+  }
   if (state.view !== 'active') {
     state.status = 'Unarchive before resuming';
     return;
@@ -360,6 +379,10 @@ async function resumeSelected(state) {
 }
 
 async function archiveSelected(state) {
+  if (state.view === 'quarantine') {
+    state.status = 'Restore this session before archiving';
+    return;
+  }
   if (state.view !== 'active') {
     state.status = 'Selected session is already archived';
     return;
@@ -376,6 +399,10 @@ async function archiveSelected(state) {
 }
 
 async function unarchiveSelected(state) {
+  if (state.view === 'quarantine') {
+    await restoreQuarantinedSelected(state);
+    return;
+  }
   if (state.view !== 'archived') {
     state.status = 'Selected session is already active';
     return;
@@ -391,7 +418,74 @@ async function unarchiveSelected(state) {
   refresh(state);
 }
 
+async function restoreQuarantinedSelected(state) {
+  const targets = actionTargetEntries(state);
+  if (targets.length !== 1) {
+    state.status = targets.length === 0
+      ? 'Restore needs one quarantined session'
+      : 'Restore is blocked for multiple selected sessions';
+    return;
+  }
+
+  let checked = await checkedQuarantineRestoreTarget(state, targets[0]);
+  if (!checked) {
+    return;
+  }
+
+  const expected = `RESTORE ${checked.entry.canonicalId}`;
+  const answer = await promptLine(state, quarantineRestoreConfirmationPrompt(checked.entry, expected));
+  if (answer.trim() !== expected) {
+    state.status = `Restore cancelled. Required input was ${expected}`;
+    return;
+  }
+
+  checked = await checkedQuarantineRestoreTarget(state, checked.entry);
+  if (!checked) {
+    return;
+  }
+
+  try {
+    const result = restoreQuarantinedEntry(state.options, checked.entry);
+    state.selected.clear();
+    refresh(state);
+    state.status = `Restored ${result.entry.canonicalId} to ${result.entry.restoreState}`;
+  } catch (error) {
+    refresh(state);
+    state.status = `Restore failed: ${sanitizeTerminalText(error.message)}`;
+  }
+}
+
+async function checkedQuarantineRestoreTarget(state, entry) {
+  const checked = revalidateQuarantineEntry(entry, state.options);
+  if (checked.ok) {
+    return checked;
+  }
+
+  await showBlockedMutation(state, 'restore', [{entry: checked.entry || entry, reason: checked.reason}]);
+  state.status = `Blocked restore: ${sanitizeTerminalText(checked.reason)}`;
+  return null;
+}
+
+function quarantineRestoreConfirmationPrompt(entry, expected) {
+  return [
+    warningText('Quarantine restore confirmation'),
+    `${strong('Transcript:')} ${entry.canonicalId}`,
+    `${strong('Quarantined file:')} ${sanitizeTerminalText(entry.file)}`,
+    `${strong('Restore target:')} ${sanitizeTerminalText(entry.originalPath)}`,
+    `${strong('Restore state:')} ${entry.restoreState}`,
+    '',
+    warningText('CSM will not overwrite an existing file or modify transcript contents.'),
+    dim('Only this exact quarantined JSONL will be moved back to its recorded path.'),
+    `${strong('Required input:')} ${requiredInput(expected)}`,
+    `${keyText('> ')}`,
+  ].join('\n');
+}
+
 async function deleteSelected(state) {
+  if (state.view === 'quarantine') {
+    state.status = 'Restore quarantined sessions with u; permanent quarantine deletion is not supported here';
+    return;
+  }
   const permanent = state.options.forceDelete;
   const action = permanent ? 'force delete' : 'quarantine';
   let entries = await checkedMutationTargets(state, actionTargetEntries(state), action);
@@ -698,6 +792,153 @@ function moveEntriesToQuarantine(options, entries) {
   return {blocked: false, batchDir};
 }
 
+function revalidateQuarantineEntry(original, options) {
+  const referenceReason = quarantineEntryReferenceReason(original, options);
+  if (referenceReason) {
+    return {ok: false, entry: original, reason: referenceReason};
+  }
+
+  const snapshot = readQuarantineManifest(original.manifestPath);
+  if (!snapshot.ok) {
+    return {ok: false, entry: original, reason: `quarantine manifest could not be read: ${snapshot.reason}`};
+  }
+  snapshot.batchDir = original.batchDir;
+  snapshot.manifestPath = original.manifestPath;
+
+  if (!Array.isArray(snapshot.manifest.items)) {
+    return {ok: false, entry: original, reason: 'quarantine manifest items are invalid'};
+  }
+  const item = snapshot.manifest.items[original.manifestIndex];
+  if (!item) {
+    return {ok: false, entry: original, reason: 'quarantine manifest item disappeared before restore'};
+  }
+
+  const fresh = buildQuarantineEntry(snapshot, item, original.manifestIndex, options);
+  if (!fresh.mutationSafe) {
+    return {ok: false, entry: fresh, reason: fresh.unsafeReason || 'quarantined session identity is unsafe'};
+  }
+  if (
+    !original.mutationSafe ||
+    !original.canonicalId ||
+    fresh.canonicalId !== original.canonicalId ||
+    fresh.manifestId !== original.manifestId ||
+    fresh.storedRelativePath !== original.storedRelativePath ||
+    fresh.originalPath !== original.originalPath ||
+    fresh.restoreState !== original.restoreState
+  ) {
+    return {ok: false, entry: fresh, reason: 'quarantine transcript or manifest identity changed before restore'};
+  }
+
+  const parentReason = restoreTargetParentBlockReason(fresh, options);
+  if (parentReason) {
+    return {ok: false, entry: fresh, reason: parentReason};
+  }
+  try {
+    if (pathExistsNoFollow(fresh.originalPath)) {
+      return {ok: false, entry: fresh, reason: 'restore target already exists; no file will be overwritten'};
+    }
+  } catch (error) {
+    return {ok: false, entry: fresh, reason: `restore target could not be checked: ${sanitizeTerminalText(error.message)}`};
+  }
+
+  return {ok: true, entry: fresh, snapshot, item};
+}
+
+function quarantineEntryReferenceReason(entry, options) {
+  if (!entry || entry.state !== 'quarantine') {
+    return 'selected entry is not quarantined';
+  }
+  const quarantineRoot = normalizePath(options.quarantineDir);
+  const batchDir = normalizePath(entry.batchDir);
+  const manifestPath = normalizePath(entry.manifestPath);
+  if (
+    !batchDir ||
+    path.dirname(batchDir) !== quarantineRoot ||
+    !manifestPath ||
+    path.dirname(manifestPath) !== batchDir ||
+    path.basename(manifestPath) !== 'manifest.json'
+  ) {
+    return 'quarantine manifest path is outside an exact batch directory';
+  }
+  if (!Number.isInteger(entry.manifestIndex) || entry.manifestIndex < 0) {
+    return 'quarantine manifest item index is invalid';
+  }
+  return '';
+}
+
+function restoreTargetParentBlockReason(entry, options) {
+  const expectedRoot = entry.restoreState === 'active'
+    ? sessionsDir(options)
+    : entry.restoreState === 'archived'
+      ? archivedDir(options)
+      : '';
+  if (!expectedRoot || !isUnderPath(entry.originalPath, expectedRoot) || path.extname(entry.originalPath) !== '.jsonl') {
+    return 'restore target is outside the recorded active or archived sessions root';
+  }
+
+  const targetParent = path.dirname(entry.originalPath);
+  const relativeParent = path.relative(expectedRoot, targetParent);
+  const parts = relativeParent && relativeParent !== '.' ? relativeParent.split(path.sep) : [];
+  let current = expectedRoot;
+  for (const part of ['', ...parts]) {
+    if (part) {
+      current = path.join(current, part);
+    }
+    try {
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        return `restore target parent is not a real directory: ${sanitizeTerminalText(current)}`;
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        break;
+      }
+      return `restore target parent could not be checked: ${sanitizeTerminalText(error.message)}`;
+    }
+  }
+  return '';
+}
+
+function restoreQuarantinedEntry(options, original) {
+  const checked = revalidateQuarantineEntry(original, options);
+  if (!checked.ok) {
+    throw new Error(checked.reason);
+  }
+
+  const entry = checked.entry;
+  fs.mkdirSync(path.dirname(entry.originalPath), {recursive: true, mode: 0o700});
+  if (pathExistsNoFollow(entry.originalPath)) {
+    throw new Error('restore target appeared before execution; no file was overwritten');
+  }
+
+  moveExactFile(entry.file, entry.originalPath);
+  const restoredAt = new Date().toISOString();
+  const remainingItems = checked.snapshot.manifest.items.filter((unused, index) => index !== entry.manifestIndex);
+  const previousRestoredItems = Array.isArray(checked.snapshot.manifest.restoredItems)
+    ? checked.snapshot.manifest.restoredItems
+    : [];
+  const updatedManifest = {
+    ...checked.snapshot.manifest,
+    status: remainingItems.length === 0 ? 'restored' : 'complete',
+    restoredAt,
+    items: remainingItems,
+    restoredItems: [...previousRestoredItems, {...checked.item, restoredAt}],
+  };
+
+  try {
+    writeManifest(entry.manifestPath, updatedManifest);
+  } catch (error) {
+    try {
+      moveExactFile(entry.originalPath, entry.file);
+    } catch (rollbackError) {
+      throw new Error(`manifest update failed (${error.message}); restore rollback also failed (${rollbackError.message}); inspect both paths`);
+    }
+    throw new Error(`manifest update failed and the transcript was returned to quarantine: ${error.message}`);
+  }
+
+  return {entry, manifest: updatedManifest};
+}
+
 async function permanentlyDeleteBatch(state, entries) {
   suspendTui(state);
   console.log('');
@@ -758,8 +999,8 @@ function writeManifest(file, manifest) {
 }
 
 function moveExactFile(source, target) {
-  if (fs.existsSync(target)) {
-    throw new Error(`quarantine target already exists: ${target}`);
+  if (pathExistsNoFollow(target)) {
+    throw new Error(`target already exists: ${target}`);
   }
   try {
     fs.renameSync(source, target);
@@ -783,6 +1024,18 @@ function moveExactFile(source, target) {
       fs.unlinkSync(target);
     } catch {
       // Keep the original error; a later rollback report points to the partial batch.
+    }
+    throw error;
+  }
+}
+
+function pathExistsNoFollow(file) {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return false;
     }
     throw error;
   }
@@ -1255,8 +1508,12 @@ function render(state) {
     lines.push(truncateStyled(`${strong('Tip:')} search applies after Enter; press Esc to return to the list`, width));
   } else {
     lines.push(truncateStyled(`Move: ${keyText('Up/Down,j/k')} | ${keyText('Tab')}=list | ${keyText('a')}=scope | ${keyText('/')}=search | ${keyText('R')}=refresh | ${keyText('q')}=quit`, width));
-    const deleteLabel = state.options.forceDelete ? danger('d=PERMADEL') : warningText('d=quarantine');
-    lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${deleteLabel} ${warningText('x')}=writer recovery`, width));
+    if (state.view === 'quarantine') {
+      lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act single only: ${successText('u')}=restore`, width));
+    } else {
+      const deleteLabel = state.options.forceDelete ? danger('d=PERMADEL') : warningText('d=quarantine');
+      lines.push(truncateStyled(`Mark: ${keyText('Space')}=row ${keyText('A')}=all ${keyText('C')}=clear | Act marked/cursor: ${successText('b')}=archive ${successText('u')}=unarchive ${deleteLabel} ${warningText('x')}=writer recovery`, width));
+    }
   }
 
   const start = state.scroll;
@@ -1283,9 +1540,15 @@ function render(state) {
     const safety = selected.mutationSafe ? 'safe' : `blocked: ${selected.unsafeReason}`;
     lines.push(truncate(`id: ${selected.id}  safety: ${safety}  source: ${selected.source}  time: ${formatDate(selected.time)}`, width));
     lines.push(truncate(`cwd: ${selected.cwd || '(unknown)'}`, width));
-    lines.push(truncate(`file: ${sanitizeTerminalText(selected.file)}`, width));
-    lines.push(truncate(`name: ${selected.title || selected.summary}`, width));
-    lines.push(truncate(`prompt: ${selected.summary}`, width));
+    if (state.view === 'quarantine') {
+      lines.push(truncate(`quarantined: ${sanitizeTerminalText(selected.file)}`, width));
+      lines.push(truncate(`restore to: ${sanitizeTerminalText(selected.originalPath)}`, width));
+      lines.push(truncate(`name: ${selected.title || selected.summary}`, width));
+    } else {
+      lines.push(truncate(`file: ${sanitizeTerminalText(selected.file)}`, width));
+      lines.push(truncate(`name: ${selected.title || selected.summary}`, width));
+      lines.push(truncate(`prompt: ${selected.summary}`, width));
+    }
   } else {
     lines.push('No sessions in this view.');
     lines.push('');
@@ -1294,7 +1557,7 @@ function render(state) {
     lines.push('');
   }
 
-  const status = state.status || `${state.view} directory: ${state.view === 'active' ? sessionsDir(state.options) : archivedDir(state.options)}`;
+  const status = state.status || `${state.view} directory: ${viewDirectory(state.view, state.options)}`;
   lines.push(color(truncate(status, width), statusColor(status)));
   writeFrame(lines, rows);
 }
@@ -1423,6 +1686,8 @@ function applyFilters(entries, options, query = '') {
       entry.title,
       entry.summary,
       entry.file,
+      entry.originalPath,
+      entry.restoreState,
       entry.unsafeReason,
     ].join(' ').toLowerCase();
     return haystack.includes(normalizedQuery);
@@ -1434,6 +1699,7 @@ function loadInventory(options) {
   return {
     active: loadEntries(sessionsDir(options), 'active', titles),
     archived: loadEntries(archivedDir(options), 'archived', titles),
+    quarantine: options.forceDelete ? [] : loadQuarantineEntries(options, titles),
   };
 }
 
@@ -1442,6 +1708,171 @@ function loadEntries(root, state, titles) {
     .map((file) => readEntry(file, state, titles))
     .filter(Boolean)
     .sort((left, right) => right.time - left.time || left.file.localeCompare(right.file));
+}
+
+function loadQuarantineEntries(options, titles) {
+  let batches;
+  try {
+    batches = fs.readdirSync(options.quarantineDir, {withFileTypes: true});
+  } catch {
+    return [];
+  }
+
+  const entries = [];
+  for (const batch of batches) {
+    if (!batch.isDirectory() || batch.name.startsWith('.partial-')) {
+      continue;
+    }
+    const batchDir = path.join(options.quarantineDir, batch.name);
+    const manifestPath = path.join(batchDir, 'manifest.json');
+    const snapshot = readQuarantineManifest(manifestPath);
+    if (!snapshot.ok || snapshot.manifest.mode !== 'quarantine' || snapshot.manifest.status !== 'complete' || !Array.isArray(snapshot.manifest.items)) {
+      continue;
+    }
+    snapshot.batchDir = batchDir;
+    snapshot.manifestPath = manifestPath;
+    snapshot.manifest.items.forEach((item, index) => {
+      entries.push(buildQuarantineEntry(snapshot, item, index, options, titles));
+    });
+  }
+
+  return entries.sort((left, right) => right.time - left.time || left.file.localeCompare(right.file));
+}
+
+function readQuarantineManifest(manifestPath) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      manifestPath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0),
+    );
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile()) {
+      return {ok: false, reason: 'quarantine manifest is not a regular file'};
+    }
+    const raw = fs.readFileSync(descriptor, 'utf8');
+    const manifest = JSON.parse(raw);
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+      return {ok: false, reason: 'quarantine manifest root is invalid'};
+    }
+    return {ok: true, raw, manifest};
+  } catch (error) {
+    return {ok: false, reason: sanitizeTerminalText(error.message)};
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
+function buildQuarantineEntry(snapshot, item, index, options, titles = new Map()) {
+  const itemObject = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
+  const manifestId = normalizeUuid(itemObject.id);
+  const storedRelativePath = typeof itemObject.storedRelativePath === 'string' ? itemObject.storedRelativePath : '';
+  const rawOriginalPath = typeof itemObject.originalPath === 'string' ? itemObject.originalPath : '';
+  const originalPath = rawOriginalPath ? normalizePath(rawOriginalPath) : '';
+  const restoreState = itemObject.state === 'active' || itemObject.state === 'archived' ? itemObject.state : '';
+  const storedFile = storedRelativePath ? path.resolve(snapshot.batchDir, storedRelativePath) : snapshot.manifestPath;
+  const manifestReason = quarantineManifestItemReason({
+    snapshot,
+    manifestId,
+    storedRelativePath,
+    storedFile,
+    rawOriginalPath,
+    originalPath,
+    restoreState,
+    options,
+  });
+
+  let entry;
+  if (!manifestReason) {
+    entry = readEntry(storedFile, 'quarantine', titles);
+  } else {
+    const identity = unsafeIdentity(manifestId, '', manifestReason);
+    entry = buildEntry({
+      file: storedFile,
+      state: 'quarantine',
+      identity,
+      timestamp: 0,
+      cwd: '',
+      source: 'quarantine',
+      summary: '(unsafe quarantine entry)',
+      role: '',
+      nickname: '',
+      title: '',
+    });
+  }
+
+  let unsafeReason = manifestReason;
+  if (!unsafeReason && !entry.mutationSafe) {
+    unsafeReason = entry.unsafeReason;
+  }
+  if (!unsafeReason && entry.canonicalId !== manifestId) {
+    unsafeReason = 'quarantine manifest UUID does not match transcript identity';
+  }
+
+  return {
+    ...entry,
+    key: `quarantine:${snapshot.manifestPath}:${index}`,
+    state: 'quarantine',
+    mutationSafe: !unsafeReason,
+    unsafeReason: sanitizeTerminalText(unsafeReason),
+    manifestId,
+    manifestPath: snapshot.manifestPath,
+    batchDir: snapshot.batchDir,
+    manifestIndex: index,
+    storedRelativePath,
+    originalPath,
+    restoreState,
+  };
+}
+
+function quarantineManifestItemReason({snapshot, manifestId, storedRelativePath, storedFile, rawOriginalPath, originalPath, restoreState, options}) {
+  if (snapshot.manifest.version !== 1 || snapshot.manifest.mode !== 'quarantine' || snapshot.manifest.status !== 'complete') {
+    return 'quarantine manifest metadata is invalid';
+  }
+  if (!manifestId) {
+    return 'quarantine manifest item UUID is missing or invalid';
+  }
+  if (!restoreState) {
+    return 'quarantine manifest item state is invalid';
+  }
+  if (!storedRelativePath || path.isAbsolute(storedRelativePath)) {
+    return 'quarantine storedRelativePath is missing or absolute';
+  }
+  const normalizedRelative = path.normalize(storedRelativePath);
+  if (normalizedRelative === '.' || normalizedRelative === '..' || normalizedRelative.startsWith(`..${path.sep}`) || normalizedRelative !== storedRelativePath) {
+    return 'quarantine storedRelativePath is unsafe';
+  }
+  if (!isUnderPath(storedFile, snapshot.batchDir) || path.extname(storedFile) !== '.jsonl') {
+    return 'quarantined transcript path is outside its batch';
+  }
+  if (
+    !rawOriginalPath ||
+    !path.isAbsolute(rawOriginalPath) ||
+    rawOriginalPath !== originalPath ||
+    path.extname(originalPath) !== '.jsonl'
+  ) {
+    return 'quarantine originalPath is missing or invalid';
+  }
+  const expectedRoot = restoreState === 'active' ? sessionsDir(options) : archivedDir(options);
+  if (!isUnderPath(originalPath, expectedRoot)) {
+    return `quarantine originalPath is outside the expected ${restoreState} directory`;
+  }
+  if (path.relative(options.codexHome, originalPath) !== storedRelativePath) {
+    return 'quarantine storedRelativePath does not match originalPath';
+  }
+  try {
+    if (fs.realpathSync(snapshot.batchDir) !== normalizePath(snapshot.batchDir)) {
+      return 'quarantine batch path resolves through a symbolic link';
+    }
+    if (fs.realpathSync(storedFile) !== normalizePath(storedFile)) {
+      return 'quarantined transcript path resolves through a symbolic link';
+    }
+  } catch (error) {
+    return `quarantined transcript could not be resolved: ${sanitizeTerminalText(error.message)}`;
+  }
+  return '';
 }
 
 function walkJsonl(root) {
@@ -1789,6 +2220,16 @@ function sessionsDir(options) {
 
 function archivedDir(options) {
   return path.join(options.codexHome, 'archived_sessions');
+}
+
+function viewDirectory(view, options) {
+  if (view === 'active') {
+    return sessionsDir(options);
+  }
+  if (view === 'archived') {
+    return archivedDir(options);
+  }
+  return options.quarantineDir;
 }
 
 function defaultQuarantineDir() {
