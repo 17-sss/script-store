@@ -3,9 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
-# Writer discovery must fail closed when an unrelated same-UID /proc entry is
-# unreadable. Run this fixture suite in its own PID namespace when available so
-# that the positive case has a complete, isolated /proc view as well.
+# Writer discovery skips only verified zombies and otherwise fails closed when
+# an unrelated same-UID /proc entry is unreadable. Run this fixture suite in its
+# own PID namespace when available so the positive scan is isolated as well.
 if [[ "${CSM_SMOKE_PID_NAMESPACE:-}" != "1" ]] && command -v unshare >/dev/null 2>&1; then
   if unshare --user --map-root-user --pid --fork --mount-proc true >/dev/null 2>&1; then
     exec env CSM_SMOKE_PID_NAMESPACE=1 \
@@ -27,11 +27,18 @@ QUARANTINE_ROOT="$TMP_DIR/xdg-data/csm/quarantine"
 PATH_WITH_FAKE="$TEST_BIN:$PATH"
 PROJECT_CWD="/tmp/csm-project"
 WRITER_PIDS=()
+AUXILIARY_PIDS=()
 
 safe_cleanup() {
   local status=$?
   local writer_pid
   for writer_pid in "${WRITER_PIDS[@]}"; do
+    if [[ "$writer_pid" =~ ^[0-9]+$ ]] && kill -0 "$writer_pid" 2>/dev/null; then
+      kill -TERM "$writer_pid" 2>/dev/null || true
+      wait "$writer_pid" 2>/dev/null || true
+    fi
+  done
+  for writer_pid in "${AUXILIARY_PIDS[@]}"; do
     if [[ "$writer_pid" =~ ^[0-9]+$ ]] && kill -0 "$writer_pid" 2>/dev/null; then
       kill -TERM "$writer_pid" 2>/dev/null || true
       wait "$writer_pid" 2>/dev/null || true
@@ -141,6 +148,24 @@ fs.mkdirSync = function mkdirSyncWithRestoreMutation(directory, options) {
   return result;
 };
 RESTORE_MUTATOR
+
+cat > "$TMP_DIR/proc-fd-deny.js" <<'PROC_FD_DENY'
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const originalReaddirSync = fs.readdirSync.bind(fs);
+fs.readdirSync = function readdirSyncWithProcDenial(directory, options) {
+  const denied = process.env.CSM_TEST_DENY_PROC_FD;
+  if (denied && path.resolve(directory) === path.resolve(denied)) {
+    const error = new Error(`EACCES: permission denied, scandir '${directory}'`);
+    error.code = 'EACCES';
+    throw error;
+  }
+  return originalReaddirSync(directory, options);
+};
+PROC_FD_DENY
 
 isolated_env() {
   env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME \
@@ -441,6 +466,77 @@ forget_fake_writer() {
   WRITER_PIDS=("${remaining[@]}")
 }
 
+start_same_user_zombie() {
+  local child_file="$TMP_DIR/zombie-child.pid"
+  : > "$child_file"
+  python3 - "$child_file" <<'PY' &
+import os
+import sys
+import time
+
+child = os.fork()
+if child == 0:
+    os._exit(0)
+with open(sys.argv[1], 'w', encoding='utf-8') as output:
+    output.write(str(child))
+time.sleep(300)
+PY
+  ZOMBIE_PARENT_PID=$!
+  AUXILIARY_PIDS+=("$ZOMBIE_PARENT_PID")
+
+  local attempt
+  for attempt in {1..100}; do
+    if [[ -s "$child_file" ]]; then
+      ZOMBIE_PID="$(<"$child_file")"
+      if [[ "$(ps -o stat= -p "$ZOMBIE_PID" 2>/dev/null)" == *Z* ]]; then
+        return
+      fi
+    fi
+    sleep 0.02
+  done
+  fail 'same-user zombie fixture did not become ready'
+}
+
+start_same_user_live_process() {
+  local ready_file="$TMP_DIR/live-process.ready"
+  : > "$ready_file"
+  python3 - "$ready_file" <<'PY' &
+import sys
+import time
+
+with open(sys.argv[1], 'w', encoding='utf-8') as output:
+    output.write('ready\n')
+time.sleep(300)
+PY
+  LIVE_PROCESS_PID=$!
+  AUXILIARY_PIDS+=("$LIVE_PROCESS_PID")
+
+  local attempt
+  for attempt in {1..100}; do
+    if [[ -s "$ready_file" ]] && kill -0 "$LIVE_PROCESS_PID" 2>/dev/null; then
+      return
+    fi
+    sleep 0.02
+  done
+  fail 'same-user live process fixture did not become ready'
+}
+
+stop_auxiliary_process() {
+  local target_pid="$1"
+  if kill -0 "$target_pid" 2>/dev/null; then
+    kill -TERM "$target_pid" 2>/dev/null || true
+  fi
+  wait "$target_pid" 2>/dev/null || true
+  local process_pid
+  local remaining=()
+  for process_pid in "${AUXILIARY_PIDS[@]}"; do
+    if [[ "$process_pid" != "$target_pid" ]]; then
+      remaining+=("$process_pid")
+    fi
+  done
+  AUXILIARY_PIDS=("${remaining[@]}")
+}
+
 assert_fake_calls() {
   local expected="$1"
   local actual
@@ -622,6 +718,10 @@ restore_move_recheck_first_file="$(write_session sessions "$uuid_bc" "$uuid_bc" 
 
 # Writer recovery always uses a same-user fixture process. It never opens the
 # user's CODEX_HOME or a real Codex process.
+start_same_user_zombie
+if ls "/proc/$ZOMBIE_PID/fd" >/dev/null 2>&1; then
+  fail 'same-user zombie fixture unexpectedly exposed its fd directory'
+fi
 writer_success_digest="$(sha256sum "$writer_success_file")"
 start_fake_writer "$writer_success_file" codex
 writer_success_pid="$WRITER_PID"
@@ -645,6 +745,18 @@ assert_contains "$(cat "$writer_success_signal_log")" 'SIGTERM'
 [[ -e "$writer_success_file" ]] || fail 'writer recovery changed the transcript file'
 [[ "$(sha256sum "$writer_success_file")" == "$writer_success_digest" ]] || \
   fail 'writer recovery modified the transcript content'
+stop_auxiliary_process "$ZOMBIE_PARENT_PID"
+
+start_same_user_live_process
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_FD="/proc/$LIVE_PROCESS_PID/fd"
+  run_tui "/case Writer no local holder\nx\nq" "$TMP_DIR/writer-unreadable-live-process.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-live-process.log")" \
+  "Writer recovery unavailable: could not read /proc/$LIVE_PROCESS_PID/fd"
+[[ -e "$writer_no_holder_file" ]] || fail 'unavailable writer diagnostics changed the transcript file'
+stop_auxiliary_process "$LIVE_PROCESS_PID"
 
 start_fake_writer "$writer_wrong_confirmation_file" codex
 writer_wrong_pid="$WRITER_PID"

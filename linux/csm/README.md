@@ -116,7 +116,7 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키지는 사용하지 않습니다.
 
 - 실행 직전에 기존 변경 작업과 같은 안전 gate를 적용합니다. filename UUID와 첫 번째 `session_meta.payload.id`가 일치하고, 정확한 active sessions root 아래 JSONL이어야 합니다.
-- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. `/proc`을 읽을 수 없거나 권한 때문에 완전하게 진단할 수 없으면 진단 불가로 표시하고 종료하지 않습니다.
+- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다. 그 외 `/proc` 경로나 살아 있는 프로세스의 FD를 읽을 수 없으면 진단 불가로 표시하고 종료하지 않습니다.
 - PID, process name/command, 그 프로세스가 함께 열고 있는 다른 Codex transcript 수를 terminal-control sanitization 후 보여 줍니다.
 - local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
 

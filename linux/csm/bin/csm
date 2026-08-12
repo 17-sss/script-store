@@ -1446,18 +1446,25 @@ function inspectProcessForTarget(pid, target, options) {
     return {available: true, exists: true, holdsTarget: false, sameUser: false};
   }
 
-  const start = readProcessStartTime(pid);
-  if (!start.ok) {
-    if (start.gone) {
+  const identity = readProcessIdentity(pid);
+  if (!identity.ok) {
+    if (identity.gone) {
       return {available: true, exists: false, holdsTarget: false};
     }
-    return unavailableProcessInspection(start.reason);
+    return unavailableProcessInspection(identity.reason);
+  }
+  if (identity.state === 'Z') {
+    return zombieProcessInspection(pid, identity.value);
   }
 
   const descriptorScan = inspectProcessDescriptors(pid, target, options);
   if (!descriptorScan.ok) {
     if (descriptorScan.gone) {
       return {available: true, exists: false, holdsTarget: false};
+    }
+    const currentIdentity = readProcessIdentity(pid);
+    if (currentIdentity.ok && currentIdentity.state === 'Z') {
+      return zombieProcessInspection(pid, currentIdentity.value);
     }
     return unavailableProcessInspection(descriptorScan.reason);
   }
@@ -1475,12 +1482,24 @@ function inspectProcessForTarget(pid, target, options) {
     exists: true,
     sameUser: true,
     pid,
-    startTime: start.value,
+    startTime: identity.value,
     name: processText.name,
     command: processText.command,
     codexRelated: reliablyIdentifiesCodexProcess(processText.name, processText.argv),
     holdsTarget: descriptorScan.holdsTarget,
     otherTranscriptCount: descriptorScan.otherTranscriptCount,
+  };
+}
+
+function zombieProcessInspection(pid, startTime) {
+  return {
+    available: true,
+    exists: true,
+    sameUser: true,
+    zombie: true,
+    pid,
+    startTime,
+    holdsTarget: false,
   };
 }
 
@@ -1493,7 +1512,7 @@ function unavailableProcessInspection(reason) {
   };
 }
 
-function readProcessStartTime(pid) {
+function readProcessIdentity(pid) {
   try {
     const stat = fs.readFileSync(path.join('/proc', String(pid), 'stat'), 'utf8');
     const commandEnd = stat.lastIndexOf(')');
@@ -1501,12 +1520,14 @@ function readProcessStartTime(pid) {
       return {ok: false, reason: `could not parse /proc/${pid}/stat`};
     }
     const fields = stat.slice(commandEnd + 1).trim().split(/\s+/);
+    // Field 3 is the process state. A zombie cannot retain open file descriptors.
+    const state = fields[0];
     // Field 22 is starttime. The tail starts at field 3 after the command.
     const startTime = fields[19];
-    if (!startTime || !/^\d+$/.test(startTime)) {
+    if (!state || state.length !== 1 || !startTime || !/^\d+$/.test(startTime)) {
       return {ok: false, reason: `could not read process start identity for PID ${pid}`};
     }
-    return {ok: true, value: startTime};
+    return {ok: true, value: startTime, state};
   } catch (error) {
     return processGone(error)
       ? {ok: false, gone: true}
