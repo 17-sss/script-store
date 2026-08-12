@@ -1029,7 +1029,18 @@ function restoreQuarantinedEntriesLocked(options, originals) {
 
   const moved = [];
   try {
-    for (const checked of checkedEntries) {
+    for (let index = 0; index < checkedEntries.length; index += 1) {
+      const original = checkedEntries[index].entry;
+      const checked = revalidateQuarantineEntry(original, options);
+      if (!checked.ok) {
+        throw new Error(`${original.canonicalId || original.id}: ${checked.reason}`);
+      }
+      const group = groups.get(checked.entry.manifestPath);
+      if (!group || checked.snapshot.raw !== group.snapshot.raw) {
+        throw new Error(`quarantine manifest changed immediately before restore: ${checked.entry.manifestPath}`);
+      }
+
+      checkedEntries[index] = checked;
       const entry = checked.entry;
       moveExactFile(entry.file, entry.originalPath);
       moved.push({source: entry.file, target: entry.originalPath});

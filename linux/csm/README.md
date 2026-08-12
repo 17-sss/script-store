@@ -160,7 +160,7 @@ RESTORE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 복원은 manifest에 기록된 active 또는 archived 원래 경로로 해당 JSONL만 이동합니다. transcript 내용은 수정하지 않으며, 기존 파일이나 심볼릭 링크가 원래 경로에 있으면 덮어쓰지 않고 선택 전체를 차단합니다. 같은 quarantine batch의 여러 항목과 서로 다른 batch에 흩어진 active/archived 항목을 함께 복원할 수 있습니다.
 
-확인 전과 확인 직후에 선택 전체의 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 하나라도 unsafe이거나 경로·identity가 바뀌면 아무 파일도 이동하지 않습니다. 최종 재검증부터 파일 이동과 manifest 갱신이 끝날 때까지 관련 batch의 `.restore.lock`을 경로 순서대로 모두 배타적으로 유지하므로, 같은 batch의 동시 복원이 서로의 manifest 갱신을 덮어쓰지 않고 여러 CSM 복원 간 교착도 피합니다. 파일 이동이나 manifest 갱신이 실패하면 선택 전체를 격리 상태로 되돌리려고 시도하며, 성공하면 각 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
+확인 전과 확인 직후에 선택 전체의 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 실제 각 JSONL을 이동하기 직전에도 해당 transcript identity와 잠근 manifest snapshot이 그대로인지 다시 확인합니다. 하나라도 unsafe이거나 경로·identity가 바뀌면 이후 이동을 중단하고 이미 이동한 선택 항목도 격리로 되돌리려고 시도합니다. 최종 재검증부터 파일 이동과 manifest 갱신이 끝날 때까지 관련 batch의 `.restore.lock`을 경로 순서대로 모두 배타적으로 유지하므로, 같은 batch의 동시 복원이 서로의 manifest 갱신을 덮어쓰지 않고 여러 CSM 복원 간 교착도 피합니다. manifest 갱신 실패도 같은 전체 rollback 대상으로 처리하며, 성공하면 각 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
 
 격리 없이 영구 삭제하려면 처음부터 `--force`로 TUI를 실행합니다.
 

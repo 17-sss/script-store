@@ -106,6 +106,42 @@ setInterval(() => {
 }, 20);
 FAKE_WRITER
 
+cat > "$TMP_DIR/restore-pre-move-mutator.js" <<'RESTORE_MUTATOR'
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const originalMkdirSync = fs.mkdirSync.bind(fs);
+let matchingCalls = 0;
+let mutated = false;
+
+fs.mkdirSync = function mkdirSyncWithRestoreMutation(directory, options) {
+  const result = originalMkdirSync(directory, options);
+  const expectedParent = process.env.CSM_TEST_RESTORE_PARENT;
+  if (!mutated && expectedParent && path.resolve(directory) === path.resolve(expectedParent)) {
+    matchingCalls += 1;
+    const triggerCall = Number(process.env.CSM_TEST_RESTORE_MKDIR_CALL || '1');
+    if (matchingCalls === triggerCall) {
+      const file = process.env.CSM_TEST_RESTORE_MUTATE_FILE;
+      const oldId = process.env.CSM_TEST_RESTORE_OLD_ID;
+      const newId = process.env.CSM_TEST_RESTORE_NEW_ID;
+      const marker = process.env.CSM_TEST_RESTORE_MARKER;
+      const original = fs.readFileSync(file, 'utf8');
+      if (!oldId || !newId || !original.includes(oldId)) {
+        throw new Error('restore pre-move mutator could not find the expected UUID');
+      }
+      const temporary = `${file}.pre-move-test`;
+      fs.writeFileSync(temporary, original.replace(oldId, newId), 'utf8');
+      fs.renameSync(temporary, file);
+      fs.writeFileSync(marker, 'mutated\n', 'utf8');
+      mutated = true;
+    }
+  }
+  return result;
+};
+RESTORE_MUTATOR
+
 isolated_env() {
   env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME \
     HOME="$TEST_HOME" \
@@ -177,6 +213,8 @@ uuid_ax="019f1000-0000-7000-8000-000000000050"
 uuid_ay="019f1000-0000-7000-8000-000000000051"
 uuid_az="019f1000-0000-7000-8000-000000000052"
 uuid_ba="019f1000-0000-7000-8000-000000000053"
+uuid_bb="019f1000-0000-7000-8000-000000000054"
+uuid_bc="019f1000-0000-7000-8000-000000000055"
 
 write_session() {
   local area="$1"
@@ -579,6 +617,8 @@ restore_unsafe_file="$(write_session sessions "$uuid_ax" "$uuid_ax" "2026-07-20T
 restore_collision_file="$(write_session sessions "$uuid_ay" "$uuid_ay" "2026-07-20T00:04:06" "case S restore target collision")"
 restore_toctou_file="$(write_session sessions "$uuid_az" "$uuid_az" "2026-07-20T00:04:07" "case S restore TOCTOU identity")"
 restore_archived_file="$(write_session archived_sessions "$uuid_ba" "$uuid_ba" "2026-07-20T00:04:08" "case S restore archived success")"
+restore_move_recheck_second_file="$(write_session sessions "$uuid_bb" "$uuid_bb" "2026-07-20T00:04:09" "case T restore immediate recheck second")"
+restore_move_recheck_first_file="$(write_session sessions "$uuid_bc" "$uuid_bc" "2026-07-20T00:04:10" "case T restore immediate recheck first")"
 
 # Writer recovery always uses a same-user fixture process. It never opens the
 # user's CODEX_HOME or a real Codex process.
@@ -853,6 +893,37 @@ assert_not_quarantined "$restore_success_file"
 assert_not_quarantined "$restore_archived_file"
 if find "$QUARANTINE_ROOT" -type f -name '.restore.lock' -print -quit | grep -q .; then
   fail 'successful cross-batch multi restore left a batch lock behind'
+fi
+
+restore_move_recheck_first_digest="$(sha256sum "$restore_move_recheck_first_file" | cut -d ' ' -f 1)"
+run_tui "/case T restore immediate recheck\nAdQUARANTINE $uuid_bc $uuid_bb\nq" "$TMP_DIR/restore-move-recheck-quarantine.log"
+assert_no_fake_calls
+assert_quarantined_file "$restore_move_recheck_first_file" "$uuid_bc"
+assert_quarantined_file "$restore_move_recheck_second_file" "$uuid_bb"
+restore_move_recheck_first_quarantined="$(quarantined_path "$restore_move_recheck_first_file")"
+restore_move_recheck_second_quarantined="$(quarantined_path "$restore_move_recheck_second_file")"
+restore_move_recheck_marker="$TMP_DIR/restore-move-recheck.mutated"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/restore-pre-move-mutator.js"
+  export CSM_TEST_RESTORE_PARENT="$(dirname -- "$restore_move_recheck_second_file")"
+  export CSM_TEST_RESTORE_MKDIR_CALL=2
+  export CSM_TEST_RESTORE_MUTATE_FILE="$restore_move_recheck_second_quarantined"
+  export CSM_TEST_RESTORE_OLD_ID="$uuid_bb"
+  export CSM_TEST_RESTORE_NEW_ID="$uuid_a"
+  export CSM_TEST_RESTORE_MARKER="$restore_move_recheck_marker"
+  run_tui "\t\t/case T restore immediate recheck\nAuRESTORE $uuid_bc $uuid_bb\nq" "$TMP_DIR/restore-move-recheck.log"
+)
+assert_no_fake_calls
+[[ -s "$restore_move_recheck_marker" ]] || fail 'restore pre-move mutation fixture did not run'
+assert_contains "$(clean_log "$TMP_DIR/restore-move-recheck.log")" "filename UUID and first session_meta UUID mismatch"
+[[ ! -e "$restore_move_recheck_first_file" ]] || fail 'multi restore left the first transcript restored after a later identity change'
+[[ ! -e "$restore_move_recheck_second_file" ]] || fail 'multi restore moved a transcript whose identity changed immediately before execution'
+assert_quarantined_file "$restore_move_recheck_first_file" "$uuid_bc"
+assert_quarantined_file "$restore_move_recheck_second_file" "$uuid_bb"
+[[ "$(sha256sum "$restore_move_recheck_first_quarantined" | cut -d ' ' -f 1)" == "$restore_move_recheck_first_digest" ]] || \
+  fail 'multi restore rollback modified the earlier quarantined transcript'
+if find "$QUARANTINE_ROOT" -type f -name '.restore.lock' -print -quit | grep -q .; then
+  fail 'blocked per-item restore recheck left a batch lock behind'
 fi
 
 run_tui "/case O multi archive\nAbq" "$TMP_DIR/multi-archive.log"
