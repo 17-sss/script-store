@@ -13,6 +13,10 @@ const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const UUID_EXACT_RE = new RegExp(`^${UUID_PATTERN}$`, 'i');
 const FILENAME_UUID_RE = new RegExp(`^rollout-.+-(${UUID_PATTERN})\\.jsonl$`, 'i');
 const PREVIEW_BYTES = 1024 * 1024;
+const WRITER_RELEASE_TIMEOUT_MS = 3000;
+const WRITER_RELEASE_POLL_MS = 100;
+const WRITER_RELEASE_STABILITY_CHECKS = 3;
+const WRITER_RELEASE_STABILITY_DELAY_MS = 150;
 const OSC_RE = /\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g;
 const CONTROL_STRING_RE = /\x1b[PX^_][\s\S]*?(?:\x1b\\|$)/g;
 const CSI_RE = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g;
@@ -579,7 +583,12 @@ async function recoverWriterSelected(state) {
   }
 
   if (diagnosis.holders.length === 0) {
-    state.status = 'No local writer holds this transcript';
+    if (diagnosis.incompleteProcesses.length > 0) {
+      await showWriterDiagnostics(state, 'Writer recovery found no verified writer', diagnosis);
+      state.status = `No verified local writer holds this transcript; ${formatIncompleteCount(diagnosis.incompleteProcesses.length)}`;
+    } else {
+      state.status = 'No local writer holds this transcript';
+    }
     return;
   }
 
@@ -596,7 +605,7 @@ async function recoverWriterSelected(state) {
 
   const writer = codexWriters[0];
   const expected = `TERMINATE WRITER ${entry.canonicalId} ${writer.pid}`;
-  const answer = await promptLine(state, writerRecoveryConfirmationPrompt(entry, writer, expected));
+  const answer = await promptLine(state, writerRecoveryConfirmationPrompt(entry, writer, diagnosis, expected));
   if (answer.trim() !== expected) {
     state.status = `Writer recovery cancelled. Required input was ${expected}`;
     return;
@@ -621,19 +630,27 @@ async function recoverWriterSelected(state) {
     return;
   }
 
-  await waitForWriterRelease();
-  diagnosis = diagnoseLocalWriters(entry.file, state.options);
+  const release = await waitForVerifiedWriterRelease(entry, writer, diagnosis.target, state.options);
   refresh(state);
-  if (!diagnosis.available) {
-    state.status = `SIGTERM sent to PID ${writer.pid}, but writer release could not be verified: ${diagnosis.reason}`;
-  } else if (diagnosis.holders.length === 0) {
-    state.status = `Writer recovery succeeded: PID ${writer.pid} released this transcript after SIGTERM`;
+  if (release.ok) {
+    const incomplete = release.diagnosis.incompleteProcesses.length;
+    state.status = incomplete === 0
+      ? `Writer recovery succeeded: PID ${writer.pid} released this transcript after SIGTERM`
+      : `Writer recovery succeeded: verified PID ${writer.pid} released this transcript; ${formatIncompleteCount(incomplete)}`;
   } else {
-    state.status = `Writer recovery unresolved: local writer FD still holds this transcript after SIGTERM`;
+    state.status = `Writer recovery unresolved: ${release.reason}`;
   }
 }
 
-function writerRecoveryConfirmationPrompt(entry, writer, expected) {
+function writerRecoveryConfirmationPrompt(entry, writer, diagnosis, expected) {
+  const incompleteLines = diagnosis.incompleteProcesses.length === 0
+    ? []
+    : [
+        '',
+        warningText(`Incomplete non-Codex process inspection: ${diagnosis.incompleteProcesses.length}`),
+        ...diagnosis.incompleteProcesses.flatMap(formatIncompleteProcess),
+        warningText('These processes will not be signaled; complete absence of other file holders cannot be proven.'),
+      ];
   return [
     danger('Terminate writer confirmation'),
     `${strong('Transcript:')} ${entry.canonicalId}`,
@@ -641,6 +658,7 @@ function writerRecoveryConfirmationPrompt(entry, writer, expected) {
     `${strong('Process name:')} ${sanitizeTerminalText(writer.name) || '(unknown)'}`,
     `${strong('Command:')} ${sanitizeTerminalText(writer.command) || '(unavailable)'}`,
     `${strong('Other Codex transcripts held:')} ${writer.otherTranscriptCount}`,
+    ...incompleteLines,
     '',
     danger('This process may interrupt other Codex sessions.'),
     warningText('The transcript file will not be deleted, moved, archived, or unarchived.'),
@@ -658,17 +676,41 @@ async function showWriterDiagnostics(state, heading, diagnosis) {
       : `${strong('Reason:')} ${sanitizeTerminalText(diagnosis.reason)}`,
   ];
 
-  if (diagnosis.holders.length === 0 && diagnosis.available) {
-    lines.push('No local writer holds this transcript.');
-  } else {
-    lines.push('', strong('Local same-user file holders:'));
-    for (const holder of diagnosis.holders) {
-      lines.push(...formatWriterHolder(holder));
+  if (diagnosis.available) {
+    if (diagnosis.holders.length === 0) {
+      lines.push(diagnosis.incompleteProcesses.length === 0
+        ? 'No local writer holds this transcript.'
+        : 'No verified local writer holds this transcript.');
+    } else {
+      lines.push('', strong('Local same-user file holders:'));
+      for (const holder of diagnosis.holders) {
+        lines.push(...formatWriterHolder(holder));
+      }
+    }
+  }
+
+  if (diagnosis.incompleteProcesses.length > 0) {
+    lines.push('', strong('Non-Codex processes not fully inspected:'));
+    for (const processInfo of diagnosis.incompleteProcesses) {
+      lines.push(...formatIncompleteProcess(processInfo));
     }
   }
 
   lines.push('', dim('No SIGTERM was sent.'), '');
   await promptLine(state, `${lines.join('\n')}${keyText('Press Enter to return: ')}`);
+}
+
+function formatIncompleteProcess(processInfo) {
+  return [
+    `- PID ${processInfo.pid}`,
+    `  name: ${sanitizeTerminalText(processInfo.name) || '(unknown)'}`,
+    `  command: ${sanitizeTerminalText(processInfo.command) || '(unavailable)'}`,
+    `  reason: ${sanitizeTerminalText(processInfo.reason) || 'file descriptors could not be inspected'}`,
+  ];
+}
+
+function formatIncompleteCount(count) {
+  return `${count} non-Codex process${count === 1 ? '' : 'es'} could not be fully inspected`;
 }
 
 function formatWriterHolder(holder) {
@@ -713,11 +755,83 @@ function revalidateWriterRecovery(entry, writer, originalTarget, options) {
     return {ok: false, reason: `PID ${writer.pid} is no longer identified as a Codex process`};
   }
 
+  const diagnosis = diagnoseLocalWriters(entry.file, options);
+  if (!diagnosis.available) {
+    return {ok: false, reason: `writer candidates could not be rechecked before SIGTERM: ${diagnosis.reason}`};
+  }
+  const codexWriters = diagnosis.holders.filter((holder) => holder.codexRelated);
+  const unrecognizedHolders = diagnosis.holders.filter((holder) => !holder.codexRelated);
+  if (unrecognizedHolders.length > 0) {
+    return {ok: false, reason: 'an unrecognized local process began holding this transcript before SIGTERM'};
+  }
+  if (codexWriters.length !== 1) {
+    return {ok: false, reason: `${codexWriters.length} Codex writer candidates hold this transcript before SIGTERM`};
+  }
+  if (codexWriters[0].pid !== writer.pid || codexWriters[0].startTime !== writer.startTime) {
+    return {ok: false, reason: 'the verified Codex writer changed before SIGTERM'};
+  }
+
   return {ok: true};
 }
 
-function waitForWriterRelease() {
-  return new Promise((resolve) => setTimeout(resolve, 300));
+async function waitForVerifiedWriterRelease(entry, writer, originalTarget, options) {
+  const deadline = Date.now() + WRITER_RELEASE_TIMEOUT_MS;
+  while (true) {
+    const target = fileIdentity(entry.file);
+    if (!target.ok) {
+      return {ok: false, reason: `target transcript could not be statted after SIGTERM: ${target.reason}`};
+    }
+    if (!sameFileIdentity(target, originalTarget)) {
+      return {ok: false, reason: 'target dev/inode changed after SIGTERM'};
+    }
+
+    const current = inspectProcessForTarget(writer.pid, target, options);
+    if (!current.available) {
+      return {ok: false, reason: `PID ${writer.pid} release could not be verified: ${current.reason}`};
+    }
+    if (current.inspectionIncomplete && current.exists && current.startTime === writer.startTime) {
+      return {ok: false, reason: `PID ${writer.pid} release could not be verified: ${current.reason}`};
+    }
+    const originalWriterStillHolds = Boolean(
+      current.exists && current.startTime === writer.startTime && current.holdsTarget
+    );
+    if (!originalWriterStillHolds) {
+      break;
+    }
+    if (Date.now() >= deadline) {
+      return {ok: false, reason: `PID ${writer.pid} still holds this transcript after SIGTERM`};
+    }
+    await delay(WRITER_RELEASE_POLL_MS);
+  }
+
+  let diagnosis;
+  for (let check = 0; check < WRITER_RELEASE_STABILITY_CHECKS; check += 1) {
+    diagnosis = diagnoseLocalWriters(entry.file, options);
+    if (!diagnosis.available) {
+      return {ok: false, reason: `PID ${writer.pid} released the transcript, but writer reacquisition could not be checked: ${diagnosis.reason}`};
+    }
+
+    const codexHolders = diagnosis.holders.filter((holder) => holder.codexRelated);
+    if (codexHolders.length > 0) {
+      const pids = codexHolders.map((holder) => holder.pid).join(', ');
+      return {ok: false, reason: `Codex PID ${pids} acquired this transcript after PID ${writer.pid} released it`};
+    }
+    const unrecognizedHolders = diagnosis.holders.filter((holder) => !holder.codexRelated);
+    if (unrecognizedHolders.length > 0) {
+      const pids = unrecognizedHolders.map((holder) => holder.pid).join(', ');
+      return {ok: false, reason: `unrecognized PID ${pids} holds this transcript after PID ${writer.pid} released it`};
+    }
+
+    if (check + 1 < WRITER_RELEASE_STABILITY_CHECKS) {
+      await delay(WRITER_RELEASE_STABILITY_DELAY_MS);
+    }
+  }
+
+  return {ok: true, diagnosis};
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function deleteConfirmationText(entries, permanent) {
@@ -1384,6 +1498,7 @@ function diagnoseLocalWriters(file, options) {
   }
 
   const holders = [];
+  const incompleteProcesses = [];
   for (const item of processEntries) {
     if (!item.isDirectory() || !/^\d+$/.test(item.name)) {
       continue;
@@ -1391,22 +1506,27 @@ function diagnoseLocalWriters(file, options) {
 
     const inspected = inspectProcessForTarget(Number(item.name), target, options);
     if (!inspected.available) {
-      return unavailableWriterDiagnosis(inspected.reason);
+      return unavailableWriterDiagnosis(inspected.reason, incompleteProcesses);
+    }
+    if (inspected.inspectionIncomplete) {
+      incompleteProcesses.push(inspected);
+      continue;
     }
     if (inspected.exists && inspected.holdsTarget) {
       holders.push(inspected);
     }
   }
 
-  return {available: true, reason: '', target, holders};
+  return {available: true, reason: '', target, holders, incompleteProcesses};
 }
 
-function unavailableWriterDiagnosis(reason) {
+function unavailableWriterDiagnosis(reason, incompleteProcesses = []) {
   return {
     available: false,
     reason: sanitizeTerminalText(reason) || 'writer diagnostics are unavailable',
     target: null,
     holders: [],
+    incompleteProcesses,
   };
 }
 
@@ -1457,6 +1577,15 @@ function inspectProcessForTarget(pid, target, options) {
     return zombieProcessInspection(pid, identity.value);
   }
 
+  const processText = readProcessText(pid);
+  if (!processText.ok) {
+    if (processText.gone) {
+      return {available: true, exists: false, holdsTarget: false};
+    }
+    return unavailableProcessInspection(processText.reason);
+  }
+  const codexRelated = reliablyIdentifiesCodexProcess(processText.name, processText.argv);
+
   const descriptorScan = inspectProcessDescriptors(pid, target, options);
   if (!descriptorScan.ok) {
     if (descriptorScan.gone) {
@@ -1466,15 +1595,33 @@ function inspectProcessForTarget(pid, target, options) {
     if (currentIdentity.ok && currentIdentity.state === 'Z') {
       return zombieProcessInspection(pid, currentIdentity.value);
     }
-    return unavailableProcessInspection(descriptorScan.reason);
-  }
-
-  const processText = readProcessText(pid);
-  if (!processText.ok) {
-    if (processText.gone) {
+    if (!currentIdentity.ok) {
+      if (currentIdentity.gone) {
+        return {available: true, exists: false, holdsTarget: false};
+      }
+      return unavailableProcessInspection(currentIdentity.reason);
+    }
+    if (currentIdentity.value !== identity.value) {
       return {available: true, exists: false, holdsTarget: false};
     }
-    return unavailableProcessInspection(processText.reason);
+
+    const currentProcessText = readProcessText(pid);
+    if (!currentProcessText.ok) {
+      if (currentProcessText.gone) {
+        return {available: true, exists: false, holdsTarget: false};
+      }
+      return unavailableProcessInspection(currentProcessText.reason);
+    }
+    const currentCodexRelated = reliablyIdentifiesCodexProcess(currentProcessText.name, currentProcessText.argv);
+    if (codexRelated || currentCodexRelated) {
+      return unavailableProcessInspection(
+        `could not inspect file descriptors for Codex candidate PID ${pid}: ${descriptorScan.reason}`
+      );
+    }
+    if (currentProcessText.name !== processText.name || currentProcessText.command !== processText.command) {
+      return unavailableProcessInspection(`process identity changed while inspecting file descriptors for PID ${pid}`);
+    }
+    return incompleteNonCodexProcessInspection(pid, identity.value, processText, descriptorScan.reason);
   }
 
   return {
@@ -1485,9 +1632,25 @@ function inspectProcessForTarget(pid, target, options) {
     startTime: identity.value,
     name: processText.name,
     command: processText.command,
-    codexRelated: reliablyIdentifiesCodexProcess(processText.name, processText.argv),
+    codexRelated,
     holdsTarget: descriptorScan.holdsTarget,
     otherTranscriptCount: descriptorScan.otherTranscriptCount,
+  };
+}
+
+function incompleteNonCodexProcessInspection(pid, startTime, processText, reason) {
+  return {
+    available: true,
+    exists: true,
+    sameUser: true,
+    inspectionIncomplete: true,
+    pid,
+    startTime,
+    name: processText.name,
+    command: processText.command,
+    codexRelated: false,
+    holdsTarget: false,
+    reason: sanitizeTerminalText(reason) || `could not inspect file descriptors for PID ${pid}`,
   };
 }
 

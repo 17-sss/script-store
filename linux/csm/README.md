@@ -116,9 +116,10 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키지는 사용하지 않습니다.
 
 - 실행 직전에 기존 변경 작업과 같은 안전 gate를 적용합니다. filename UUID와 첫 번째 `session_meta.payload.id`가 일치하고, 정확한 active sessions root 아래 JSONL이어야 합니다.
-- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다. 그 외 `/proc` 경로나 살아 있는 프로세스의 FD를 읽을 수 없으면 진단 불가로 표시하고 종료하지 않습니다.
+- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. FD보다 먼저 process start identity와 name/command를 읽고 Codex 후보인지 분류합니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다.
+- Codex 후보의 FD를 완전히 읽을 수 없으면 진단 불가로 표시하고 어떤 프로세스도 종료하지 않습니다. name/command가 안정적으로 비-Codex로 확인된 프로세스의 FD만 권한 때문에 읽을 수 없으면 PID, name/command, 실패 원인을 경고로 표시하되 검증된 Codex writer 탐색은 계속합니다. 따라서 전체 로컬 holder 부재를 증명하지는 않으며, 읽을 수 있는 비-Codex 프로세스가 실제 target `dev`/`ino`를 잡고 있으면 기존처럼 종료를 차단합니다.
 - PID, process name/command, 그 프로세스가 함께 열고 있는 다른 Codex transcript 수를 terminal-control sanitization 후 보여 줍니다.
-- local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
+- 완전히 검사한 결과 local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. 일부 non-Codex 프로세스의 FD를 검사하지 못했다면 `No verified local writer holds this transcript`와 경고를 함께 표시합니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
 
 종료는 정확히 하나의 Codex writer 후보일 때만 가능합니다. 확인 화면은 다른 Codex 세션도 끊길 수 있음을 경고하고, 아래처럼 full UUID와 PID를 모두 포함한 정확한 입력을 요구합니다.
 
@@ -126,7 +127,7 @@ Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키�
 TERMINATE WRITER 019efcef-19e5-7a83-821a-1b3ec9e1716d 12345
 ```
 
-확인 직후에도 transcript identity, target `dev`/`ino`, PID의 UID와 process start identity, 해당 PID의 target FD 점유를 모두 다시 확인합니다. 통과한 정확한 PID 하나에만 `SIGTERM`을 보내며 process group, parent/child tree, `pkill`, `SIGKILL`, sudo는 사용하지 않습니다. 짧게 기다린 뒤 FD 점유를 다시 검사해 해제 성공 또는 미해제 상태를 표시합니다.
+확인 직후에도 transcript identity, target `dev`/`ino`, PID의 UID와 process start identity, 해당 PID의 target FD 점유를 모두 다시 확인합니다. 통과한 정확한 PID 하나에만 `SIGTERM`을 보내며 process group, parent/child tree, `pkill`, `SIGKILL`, sudo는 사용하지 않습니다. 최대 약 3초 동안 해당 PID의 target FD 해제를 polling하고, 짧은 안정화 구간 동안 새 Codex PID가 같은 transcript를 다시 잡지 않았는지도 검사합니다. 검증한 PID가 해제하면 성공으로 표시하고, 계속 보유하거나 다른 Codex PID가 재점유하면 미해제 상태를 명확히 표시합니다. `x`는 writer recovery만 수행하며 자동으로 `codex resume`을 실행하지 않습니다.
 
 ## 격리와 영구 삭제
 

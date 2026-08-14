@@ -3,9 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
-# Writer discovery skips only verified zombies and otherwise fails closed when
-# an unrelated same-UID /proc entry is unreadable. Run this fixture suite in its
-# own PID namespace when available so the positive scan is isolated as well.
+# Writer discovery skips verified zombies, records unreadable non-Codex
+# processes without signaling them, and still fails closed for unreadable Codex
+# candidates. Run this fixture suite in its own PID namespace when available.
 if [[ "${CSM_SMOKE_PID_NAMESPACE:-}" != "1" ]] && command -v unshare >/dev/null 2>&1; then
   if unshare --user --map-root-user --pid --fork --mount-proc true >/dev/null 2>&1; then
     exec env CSM_SMOKE_PID_NAMESPACE=1 \
@@ -113,6 +113,36 @@ setInterval(() => {
 }, 20);
 FAKE_WRITER
 
+cat > "$TMP_DIR/fake-codex-reacquirer.js" <<'FAKE_REACQUIRER'
+'use strict';
+
+const fs = require('fs');
+
+const [file, triggerFile, readyFile, signalLog] = process.argv.slice(2);
+let fd = null;
+
+function closeAndExit() {
+  if (fd !== null) {
+    fs.closeSync(fd);
+    fd = null;
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => {
+  fs.writeFileSync(signalLog, 'SIGTERM\n', {flag: 'a'});
+  closeAndExit();
+});
+
+setInterval(() => {
+  if (fd !== null || !fs.existsSync(triggerFile) || fs.statSync(triggerFile).size === 0) {
+    return;
+  }
+  fd = fs.openSync(file, 'r+');
+  fs.writeFileSync(readyFile, 'ready\n');
+}, 10);
+FAKE_REACQUIRER
+
 cat > "$TMP_DIR/restore-pre-move-mutator.js" <<'RESTORE_MUTATOR'
 'use strict';
 
@@ -156,6 +186,7 @@ const fs = require('fs');
 const path = require('path');
 
 const originalReaddirSync = fs.readdirSync.bind(fs);
+const originalStatSync = fs.statSync.bind(fs);
 fs.readdirSync = function readdirSyncWithProcDenial(directory, options) {
   const denied = process.env.CSM_TEST_DENY_PROC_FD;
   if (denied && path.resolve(directory) === path.resolve(denied)) {
@@ -164,6 +195,15 @@ fs.readdirSync = function readdirSyncWithProcDenial(directory, options) {
     throw error;
   }
   return originalReaddirSync(directory, options);
+};
+fs.statSync = function statSyncWithProcDenial(file, options) {
+  const denied = process.env.CSM_TEST_DENY_PROC_FD_STAT;
+  if (denied && path.dirname(path.resolve(file)) === path.resolve(denied)) {
+    const error = new Error(`EACCES: permission denied, stat '${file}'`);
+    error.code = 'EACCES';
+    throw error;
+  }
+  return originalStatSync(file, options);
 };
 PROC_FD_DENY
 
@@ -240,6 +280,9 @@ uuid_az="019f1000-0000-7000-8000-000000000052"
 uuid_ba="019f1000-0000-7000-8000-000000000053"
 uuid_bb="019f1000-0000-7000-8000-000000000054"
 uuid_bc="019f1000-0000-7000-8000-000000000055"
+uuid_bd="019f1000-0000-7000-8000-000000000056"
+uuid_be="019f1000-0000-7000-8000-000000000057"
+uuid_bf="019f1000-0000-7000-8000-000000000058"
 
 write_session() {
   local area="$1"
@@ -436,6 +479,32 @@ start_fake_writer() {
     sleep 0.02
   done
   fail "fake writer did not become ready: $WRITER_PID"
+}
+
+start_fake_reacquirer() {
+  local file="$1"
+  local trigger_file="$2"
+  local writer_tag="${RANDOM}-${RANDOM}"
+  REACQUIRER_READY_FILE="$TMP_DIR/reacquirer-$writer_tag.ready"
+  REACQUIRER_SIGNAL_LOG="$TMP_DIR/reacquirer-$writer_tag.signal"
+  : > "$REACQUIRER_READY_FILE"
+  : > "$REACQUIRER_SIGNAL_LOG"
+
+  (
+    exec -a codex node "$TMP_DIR/fake-codex-reacquirer.js" \
+      "$file" "$trigger_file" "$REACQUIRER_READY_FILE" "$REACQUIRER_SIGNAL_LOG"
+  ) &
+  REACQUIRER_PID=$!
+  WRITER_PIDS+=("$REACQUIRER_PID")
+
+  local attempt
+  for attempt in {1..100}; do
+    if kill -0 "$REACQUIRER_PID" 2>/dev/null; then
+      return
+    fi
+    sleep 0.02
+  done
+  fail "fake Codex reacquirer did not start: $REACQUIRER_PID"
 }
 
 assert_writer_alive_without_sigterm() {
@@ -705,6 +774,9 @@ writer_fd_disappears_file="$(write_session sessions "$uuid_ap" "$uuid_ap" "2026-
 writer_identity_changes_file="$(write_session sessions "$uuid_aq" "$uuid_aq" "2026-07-20T00:03:08" "case Writer file identity changes during confirmation")"
 writer_archived_file="$(write_session archived_sessions "$uuid_ar" "$uuid_ar" "2026-07-20T00:03:09" "case Writer archived session")"
 writer_multiple_holders_file="$(write_session sessions "$uuid_as" "$uuid_as" "2026-07-20T00:03:10" "case Writer multiple Codex holders")"
+writer_unreadable_codex_file="$(write_session sessions "$uuid_bd" "$uuid_bd" "2026-07-20T00:03:11" "case Writer unreadable Codex candidate")"
+writer_reacquired_file="$(write_session sessions "$uuid_be" "$uuid_be" "2026-07-20T00:03:12" "case Writer reacquired after SIGTERM")"
+writer_candidate_changes_file="$(write_session sessions "$uuid_bf" "$uuid_bf" "2026-07-20T00:03:13" "case Writer candidate changes before SIGTERM")"
 restore_success_file="$(write_session sessions "$uuid_at" "$uuid_at" "2026-07-20T00:04:01" "case S restore active success")"
 restore_wrong_file="$(write_session sessions "$uuid_au" "$uuid_au" "2026-07-20T00:04:02" "case S restore wrong confirmation")"
 restore_multi_one_file="$(write_session sessions "$uuid_av" "$uuid_av" "2026-07-20T00:04:03" "case S restore multi one")"
@@ -723,10 +795,15 @@ if ls "/proc/$ZOMBIE_PID/fd" >/dev/null 2>&1; then
   fail 'same-user zombie fixture unexpectedly exposed its fd directory'
 fi
 writer_success_digest="$(sha256sum "$writer_success_file")"
+start_same_user_live_process
 start_fake_writer "$writer_success_file" codex
 writer_success_pid="$WRITER_PID"
 writer_success_signal_log="$WRITER_SIGNAL_LOG"
-run_tui "/case Writer recovery success\nxTERMINATE WRITER $uuid_aj $writer_success_pid\nq" "$TMP_DIR/writer-success.log"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_FD_STAT="/proc/$LIVE_PROCESS_PID/fd"
+  run_tui "/case Writer recovery success\nxTERMINATE WRITER $uuid_aj $writer_success_pid\nq" "$TMP_DIR/writer-success.log"
+)
 for writer_wait_attempt in {1..100}; do
   if ! kill -0 "$writer_success_pid" 2>/dev/null; then
     break
@@ -741,22 +818,40 @@ wait "$writer_success_pid"
 forget_fake_writer "$writer_success_pid"
 assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "Required input: TERMINATE WRITER $uuid_aj $writer_success_pid"
 assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "Writer recovery succeeded"
+assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" \
+  "1 non-Codex process could not be fully inspected"
+assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "PID $LIVE_PROCESS_PID"
 assert_contains "$(cat "$writer_success_signal_log")" 'SIGTERM'
 [[ -e "$writer_success_file" ]] || fail 'writer recovery changed the transcript file'
 [[ "$(sha256sum "$writer_success_file")" == "$writer_success_digest" ]] || \
   fail 'writer recovery modified the transcript content'
+stop_auxiliary_process "$LIVE_PROCESS_PID"
 stop_auxiliary_process "$ZOMBIE_PARENT_PID"
 
 start_same_user_live_process
 (
   export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
-  export CSM_TEST_DENY_PROC_FD="/proc/$LIVE_PROCESS_PID/fd"
+  export CSM_TEST_DENY_PROC_FD_STAT="/proc/$LIVE_PROCESS_PID/fd"
   run_tui "/case Writer no local holder\nx\nq" "$TMP_DIR/writer-unreadable-live-process.log"
 )
 assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-live-process.log")" \
-  "Writer recovery unavailable: could not read /proc/$LIVE_PROCESS_PID/fd"
-[[ -e "$writer_no_holder_file" ]] || fail 'unavailable writer diagnostics changed the transcript file'
+  "No verified local writer holds this transcript; 1 non-Codex process could not be fully inspected"
+assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-live-process.log")" "PID $LIVE_PROCESS_PID"
+[[ -e "$writer_no_holder_file" ]] || fail 'incomplete writer diagnostics changed the transcript file'
 stop_auxiliary_process "$LIVE_PROCESS_PID"
+
+start_fake_writer "$writer_unreadable_codex_file" codex
+writer_unreadable_codex_pid="$WRITER_PID"
+writer_unreadable_codex_signal_log="$WRITER_SIGNAL_LOG"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_FD="/proc/$writer_unreadable_codex_pid/fd"
+  run_tui "/case Writer unreadable Codex candidate\nx\nq" "$TMP_DIR/writer-unreadable-codex.log"
+)
+assert_writer_alive_without_sigterm "$writer_unreadable_codex_pid" "$writer_unreadable_codex_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-codex.log")" \
+  "Writer recovery unavailable: could not inspect file descriptors for Codex candidate PID $writer_unreadable_codex_pid"
+stop_fake_writer "$writer_unreadable_codex_pid"
 
 start_fake_writer "$writer_wrong_confirmation_file" codex
 writer_wrong_pid="$WRITER_PID"
@@ -794,6 +889,61 @@ assert_writer_alive_without_sigterm "$writer_holder_two_pid" "$writer_holder_two
 assert_contains "$(clean_log "$TMP_DIR/writer-multiple-holders.log")" "2 Codex writer candidates hold this transcript"
 stop_fake_writer "$writer_holder_one_pid"
 stop_fake_writer "$writer_holder_two_pid"
+
+writer_candidate_changes_digest="$(sha256sum "$writer_candidate_changes_file")"
+start_fake_writer "$writer_candidate_changes_file" codex
+writer_original_candidate_pid="$WRITER_PID"
+writer_original_candidate_signal_log="$WRITER_SIGNAL_LOG"
+writer_candidate_trigger="$TMP_DIR/writer-candidate-change.trigger"
+: > "$writer_candidate_trigger"
+start_fake_reacquirer "$writer_candidate_changes_file" "$writer_candidate_trigger"
+writer_new_candidate_pid="$REACQUIRER_PID"
+writer_new_candidate_ready_file="$REACQUIRER_READY_FILE"
+writer_new_candidate_signal_log="$REACQUIRER_SIGNAL_LOG"
+(
+  sleep 5.3
+  printf 'reacquire\n' > "$writer_candidate_trigger"
+) &
+writer_candidate_mutator_pid=$!
+run_tui "/case Writer candidate changes before SIGTERM\nxTERMINATE WRITER $uuid_bf $writer_original_candidate_pid\nq" \
+  "$TMP_DIR/writer-candidate-changes.log"
+wait "$writer_candidate_mutator_pid"
+[[ -s "$writer_new_candidate_ready_file" ]] || fail 'second Codex writer did not appear before SIGTERM revalidation'
+assert_writer_alive_without_sigterm "$writer_original_candidate_pid" "$writer_original_candidate_signal_log"
+assert_writer_alive_without_sigterm "$writer_new_candidate_pid" "$writer_new_candidate_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-candidate-changes.log")" \
+  "2 Codex writer candidates hold this transcript before SIGTERM"
+[[ "$(sha256sum "$writer_candidate_changes_file")" == "$writer_candidate_changes_digest" ]] || \
+  fail 'writer candidate revalidation modified the transcript content'
+stop_fake_writer "$writer_original_candidate_pid"
+stop_fake_writer "$writer_new_candidate_pid"
+
+writer_reacquired_digest="$(sha256sum "$writer_reacquired_file")"
+start_fake_writer "$writer_reacquired_file" codex
+writer_releasing_pid="$WRITER_PID"
+writer_releasing_signal_log="$WRITER_SIGNAL_LOG"
+start_fake_reacquirer "$writer_reacquired_file" "$writer_releasing_signal_log"
+writer_reacquirer_pid="$REACQUIRER_PID"
+writer_reacquirer_ready_file="$REACQUIRER_READY_FILE"
+writer_reacquirer_signal_log="$REACQUIRER_SIGNAL_LOG"
+run_tui "/case Writer reacquired after SIGTERM\nxTERMINATE WRITER $uuid_be $writer_releasing_pid\nq" \
+  "$TMP_DIR/writer-reacquired.log"
+wait "$writer_releasing_pid"
+forget_fake_writer "$writer_releasing_pid"
+for writer_wait_attempt in {1..100}; do
+  if [[ -s "$writer_reacquirer_ready_file" ]]; then
+    break
+  fi
+  sleep 0.02
+done
+[[ -s "$writer_reacquirer_ready_file" ]] || fail 'replacement Codex writer did not reacquire the transcript'
+assert_writer_alive_without_sigterm "$writer_reacquirer_pid" "$writer_reacquirer_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-reacquired.log")" \
+  "Writer recovery unresolved: Codex PID $writer_reacquirer_pid acquired this transcript after PID $writer_releasing_pid released it"
+assert_contains "$(cat "$writer_releasing_signal_log")" 'SIGTERM'
+[[ "$(sha256sum "$writer_reacquired_file")" == "$writer_reacquired_digest" ]] || \
+  fail 'writer reacquisition verification modified the transcript content'
+stop_fake_writer "$writer_reacquirer_pid"
 
 run_tui "/case Writer no local holder\nxq" "$TMP_DIR/writer-no-holder.log"
 assert_contains "$(clean_log "$TMP_DIR/writer-no-holder.log")" "No local writer holds this transcript"
