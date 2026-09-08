@@ -43,6 +43,18 @@ _cxt_complete() {
       ;;
   esac
 
+  if [ "$previous" = = ] && [ "$COMP_CWORD" -gt 1 ]; then
+    option="${COMP_WORDS[COMP_CWORD - 2]}"
+    case "$option" in
+      --attach|--at|--kill-session|--ks)
+        while IFS= read -r candidate; do
+          [ -n "$candidate" ] && COMPREPLY+=("$candidate")
+        done < <(compgen -W "$(_cxt_session_names)" -- "$current")
+        return 0
+        ;;
+    esac
+  fi
+
   case "$current" in
     --attach=*|--at=*|--kill-session=*|--ks=*)
       option="${current%%=*}"
@@ -60,7 +72,7 @@ _cxt_complete() {
       while IFS= read -r candidate; do
         [ -n "$candidate" ] && COMPREPLY+=("$candidate")
       done < <(compgen -W '
-        --sol --terra --luna --gpt55 --gpt54 --mini --spark
+        --sol --terra --luna --gpt55 --mini --spark
         --low --medium --high --xhigh --max --ultra
         --safe --auto --full-auto --madmax
         --attach --at --kill-session --ks --kill-all --ka

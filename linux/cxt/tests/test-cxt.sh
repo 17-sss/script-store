@@ -10,6 +10,7 @@ ZSH_COMPLETION="$CXT_DIR/completions/cxt.zsh"
 BASH_COMPLETION="$CXT_DIR/completions/cxt.bash"
 LEGACY_CX="${CXT_DIR%/*}/cx/bin/cx"
 ORIGINAL_PATH="$PATH"
+NO_LOCAL_BIN_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 ZSH_BIN="$(command -v zsh || true)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cxt-test.XXXXXX")"
 DEFAULT_CODEX_ARGS=(
@@ -115,6 +116,12 @@ if [ "${CXT_TMUX_FAIL_CALL:-}" = "$call_number" ]; then
 fi
 
 case "${1:-}" in
+  new-session)
+    printf '%s\n' "${CXT_TMUX_NEW_SESSION_PANE:-%1}"
+    ;;
+  split-window)
+    printf '%s\n' "${CXT_TMUX_SPLIT_PANE:-%2}"
+    ;;
   list-sessions)
     if [ -r "${CXT_TMUX_SESSIONS:-}" ]; then
       while IFS= read -r mock_session || [ -n "$mock_session" ]; do
@@ -189,7 +196,8 @@ fi
 "$CXT" --cxt-help > "$TMP_ROOT/cxt-help"
 assert_file_contains "$TMP_ROOT/cxt-help" 'Usage: cxt [CXT_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--sol       --model gpt-5.6-sol'
-assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + untrusted approvals'
+assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + on-request approvals'
+! grep -Fq -- '--gpt54' "$TMP_ROOT/cxt-help" || fail 'retired --gpt54 remains in cxt help'
 assert_file_contains "$TMP_ROOT/cxt-help" '--attach, --at [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-session, --ks [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-all, --ka'
@@ -217,8 +225,20 @@ assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-luna
 run_direct_case model-gpt55 --gpt55
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.5
 
-run_direct_case model-gpt54 --gpt54
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4
+gpt54_root="$TMP_ROOT/retired-gpt54"
+mkdir -p "$gpt54_root/project"
+make_minimal_bin "$gpt54_root/bin"
+make_codex_mock "$gpt54_root/bin"
+set +e
+(
+  cd "$gpt54_root/project"
+  PATH="$gpt54_root/bin" CXT_CODEX_LOG="$gpt54_root/codex.args" "$CXT" --gpt54
+) 2> "$gpt54_root/stderr"
+gpt54_status=$?
+set -e
+[ "$gpt54_status" -eq 2 ] || fail "retired --gpt54 returned $gpt54_status instead of 2"
+assert_file_contains "$gpt54_root/stderr" 'cxt: --gpt54 is retired because gpt-5.4 is not list-visible'
+[ ! -e "$gpt54_root/codex.args" ] || fail 'retired --gpt54 launched Codex'
 
 run_direct_case model-mini --mini
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4-mini
@@ -227,7 +247,7 @@ run_direct_case model-spark --spark
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.3-codex-spark
 
 run_direct_case permission-safe --safe
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox read-only --ask-for-approval untrusted
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox read-only --ask-for-approval on-request
 
 run_direct_case permission-auto --auto
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox workspace-write --ask-for-approval on-request
@@ -253,11 +273,14 @@ assert_args "$DIRECT_LOG" \
 run_direct_case prompt --xhigh '현재 프로젝트의 테스트를 수정해줘'
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
 
-run_direct_case passthrough -- --sol --high --auto --madmax --at --ks --ka
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --sol --high --auto --madmax --at --ks --ka
+run_direct_case passthrough -- --sol --gpt54 --high --auto --madmax --at --ks --ka
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --sol --gpt54 --high --auto --madmax --at --ks --ka
 
 run_direct_case native --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
+
+run_direct_case native-gpt54 --model gpt-5.4
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4
 
 run_direct_case transcript-override -c 'tui.keymap.global.open_transcript="alt-t"'
 assert_args "$DIRECT_LOG" \
@@ -308,7 +331,8 @@ make_tmux_mock "$session_root/bin"
 printf '%s\n' \
   '400:work' \
   '100:codex-project-old' \
-  '300:codex-project-new' > "$session_root/sessions"
+  '300:codex-project-new' \
+  '500:codex-invalid.name' > "$session_root/sessions"
 
 (
   unset TMUX
@@ -378,6 +402,7 @@ assert_args "$session_root/tmux.args.1" list-sessions -F '#{session_created}:#{s
 assert_args "$session_root/tmux.args.2" display-message -p '#{session_name}'
 assert_args "$session_root/tmux.args.3" kill-session -t codex-project-new
 assert_args "$session_root/tmux.args.4" kill-session -t codex-project-old
+[ ! -e "$session_root/tmux.args.5" ] || fail 'kill-all targeted a malformed codex session'
 
 rm -f "$session_root/tmux.count" "$session_root"/tmux.args.*
 set +e
@@ -503,6 +528,21 @@ PATH="$completion_root/bin" \
   ' > "$completion_root/bash-ks-equals.out"
 assert_file_contains "$completion_root/bash-ks-equals.out" '--ks=codex-project_two-120000'
 
+rm -f "$completion_root/bash-tmux.count" "$completion_root"/bash-tmux.args.*
+PATH="$completion_root/bin" \
+  CXT_TMUX_COUNT="$completion_root/bash-tmux.count" \
+  CXT_TMUX_LOG="$completion_root/bash-tmux.args" \
+  CXT_TMUX_SESSIONS="$completion_root/sessions" \
+  BASH_COMPLETION="$BASH_COMPLETION" \
+  bash -c '
+    source "$BASH_COMPLETION"
+    COMP_WORDS=(cxt --attach = codex-proj)
+    COMP_CWORD=3
+    _cxt_complete
+    printf "%s\n" "${COMPREPLY[@]}"
+  ' > "$completion_root/bash-attach-split-equals.out"
+assert_file_contains "$completion_root/bash-attach-split-equals.out" 'codex-project_two-120000'
+
 if [ -n "$ZSH_BIN" ]; then
   PATH="$completion_root/bin" \
     CXT_TMUX_COUNT="$completion_root/zsh-tmux.count" \
@@ -553,12 +593,15 @@ make_tmux_mock "$tmux_root/bin"
     "$CXT" --xhigh 'prompt with spaces'
 )
 assert_args "$tmux_root/tmux.args.1" \
-  new-session -d -s codex-Project-name-demo-000000 -c "$tmux_project" \
-  codex "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' 'prompt with spaces'
+  new-session -d -P -F '#{pane_id}' -s codex-Project-name-demo-000000 -c "$tmux_project" /bin/cat
 assert_args "$tmux_root/tmux.args.2" set-option -t codex-Project-name-demo-000000 mouse on
 assert_args "$tmux_root/tmux.args.3" set-option -w -t codex-Project-name-demo-000000 history-limit 50000
 assert_args "$tmux_root/tmux.args.4" set-option -w -t codex-Project-name-demo-000000 remain-on-exit off
-assert_args "$tmux_root/tmux.args.5" attach-session -t codex-Project-name-demo-000000
+assert_args "$tmux_root/tmux.args.5" \
+  split-window -d -P -F '#{pane_id}' -t %1 -c "$tmux_project" \
+  codex "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' 'prompt with spaces'
+assert_args "$tmux_root/tmux.args.6" kill-pane -t %1
+assert_args "$tmux_root/tmux.args.7" attach-session -t codex-Project-name-demo-000000
 
 rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
 (
@@ -569,7 +612,7 @@ rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
     CXT_TMUX_LOG="$tmux_root/tmux.args" \
     "$CXT" review
 )
-assert_args "$tmux_root/tmux.args.5" switch-client -t codex-Project-name-demo-000000
+assert_args "$tmux_root/tmux.args.7" switch-client -t codex-Project-name-demo-000000
 
 rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
 set +e
@@ -590,6 +633,26 @@ assert_args "$tmux_root/tmux.args.3" \
   set-option -w -t codex-Project-name-demo-000000 history-limit 50000
 assert_args "$tmux_root/tmux.args.4" kill-session -t codex-Project-name-demo-000000
 [ ! -e "$tmux_root/tmux.args.5" ] || fail 'history-limit failure attached to the cxt session'
+
+rm -f "$tmux_root/tmux.count" "$tmux_root"/tmux.args.*
+set +e
+(
+  unset TMUX
+  cd "$tmux_project"
+  PATH="$tmux_root/bin" \
+    CXT_TMUX_COUNT="$tmux_root/tmux.count" \
+    CXT_TMUX_LOG="$tmux_root/tmux.args" \
+    CXT_TMUX_FAIL_CALL=5 \
+    "$CXT"
+) 2> "$tmux_root/split-window-failure.stderr"
+split_window_status=$?
+set -e
+[ "$split_window_status" -eq 1 ] || \
+  fail "split-window failure returned $split_window_status instead of 1"
+assert_args "$tmux_root/tmux.args.5" \
+  split-window -d -P -F '#{pane_id}' -t %1 -c "$tmux_project" codex "${DEFAULT_CODEX_ARGS[@]}"
+assert_args "$tmux_root/tmux.args.6" kill-session -t codex-Project-name-demo-000000
+[ ! -e "$tmux_root/tmux.args.7" ] || fail 'split-window failure attached to the cxt session'
 
 # Installer tests always use temporary homes.
 install_home="$TMP_ROOT/install-home"
@@ -716,6 +779,14 @@ HOME="$legacy_other_home" SHELL=/bin/bash PATH="$ORIGINAL_PATH" "$INSTALLER" \
 [ -L "$legacy_other_home/.local/bin/cxt" ] || fail 'installer did not create cxt beside a non-managed cx link'
 [ "$(readlink "$legacy_other_home/.local/bin/cx")" = "$legacy_other_target" ] || fail 'installer changed a non-managed cx link'
 assert_file_contains "$legacy_other_home/stderr" 'Left non-managed legacy cx path unchanged'
+
+path_name_home="$TMP_ROOT/path-name-home"
+mkdir -p "$path_name_home"
+printf 'export BACKUP_PATH="$HOME/.local/bin"\n' > "$path_name_home/.bashrc"
+HOME="$path_name_home" SHELL=/bin/bash PATH="$NO_LOCAL_BIN_PATH" "$INSTALLER"
+assert_file_contains "$path_name_home/.bashrc" 'export BACKUP_PATH="$HOME/.local/bin"'
+assert_count 1 '# >>> script-store cxt >>>' "$path_name_home/.bashrc"
+assert_file_contains "$path_name_home/.bashrc" 'export PATH="$HOME/.local/bin:$PATH"'
 
 configured_home="$TMP_ROOT/configured-home"
 mkdir -p "$configured_home"

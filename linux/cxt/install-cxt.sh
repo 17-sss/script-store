@@ -255,7 +255,16 @@ rc_has_local_bin() {
   [ -f "$rc_file" ] || return 1
   awk '
     /^[[:space:]]*#/ { next }
-    index($0, ".local/bin") && $0 ~ /PATH/ { found = 1 }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+    }
+    index(line, ".local/bin") && \
+      line ~ /^(export[[:space:]]+)?PATH[[:space:]]*=/ { found = 1 }
+    index(line, ".local/bin") && \
+      line ~ /^(typeset|declare)[[:space:]]+(-[^[:space:]]+[[:space:]]+)*PATH[[:space:]]*=/ { found = 1 }
+    index(line, ".local/bin") && \
+      line ~ /^path[[:space:]]*\+?=/ { found = 1 }
     END { exit(found ? 0 : 1) }
   ' "$rc_file"
 }

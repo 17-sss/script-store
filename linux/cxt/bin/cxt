@@ -16,7 +16,6 @@ cxt shortcuts:
     --terra     --model gpt-5.6-terra
     --luna      --model gpt-5.6-luna
     --gpt55     --model gpt-5.5
-    --gpt54     --model gpt-5.4
     --mini      --model gpt-5.4-mini
     --spark     --model gpt-5.3-codex-spark
 
@@ -24,7 +23,7 @@ cxt shortcuts:
     --low --medium --high --xhigh --max --ultra
 
   Permission presets:
-    --safe       read-only + untrusted approvals
+    --safe       read-only + on-request approvals
     --auto       workspace-write + on-request approvals
     --full-auto  workspace-write + no approval prompts
     --madmax     --yolo (no sandbox or approval prompts)
@@ -112,10 +111,7 @@ latest_cxt_session() {
   local latest_session=
 
   while IFS=: read -r created candidate; do
-    case "$candidate" in
-      "$CXT_SESSION_PREFIX"*) ;;
-      *) continue ;;
-    esac
+    validate_cxt_session_name "$candidate" >/dev/null 2>&1 || continue
     case "$created" in
       ''|*[!0-9]*) continue ;;
     esac
@@ -194,9 +190,8 @@ run_session_action() {
       ;;
     kill-all)
       while IFS=: read -r created candidate; do
-        case "$candidate" in
-          "$CXT_SESSION_PREFIX"*) sessions+=("$candidate") ;;
-        esac
+        validate_cxt_session_name "$candidate" >/dev/null 2>&1 || continue
+        sessions+=("$candidate")
       done <<EOF
 $(cxt_session_rows)
 EOF
@@ -267,7 +262,7 @@ add_permission_shortcut() {
 
   case "$shortcut" in
     --safe)
-      codex_args+=(--sandbox read-only --ask-for-approval untrusted)
+      codex_args+=(--sandbox read-only --ask-for-approval on-request)
       ;;
     --auto)
       codex_args+=(--sandbox workspace-write --ask-for-approval on-request)
@@ -366,8 +361,9 @@ while [ "$#" -gt 0 ]; do
       add_model_shortcut "$arg" gpt-5.5
       ;;
     --gpt54)
-      codex_input_seen=1
-      add_model_shortcut "$arg" gpt-5.4
+      printf '%s\n' \
+        'cxt: --gpt54 is retired because gpt-5.4 is not list-visible; use --model gpt-5.4 directly if your account exposes it' >&2
+      exit 2
       ;;
     --mini)
       codex_input_seen=1
@@ -418,12 +414,17 @@ fi
 session="${CXT_SESSION_PREFIX}${session_directory}-$(date +%H%M%S)"
 session="${session//[^A-Za-z0-9_-]/-}"
 
-if ! tmux new-session \
+bootstrap_pane="$(tmux new-session \
   -d \
+  -P \
+  -F '#{pane_id}' \
   -s "$session" \
   -c "$PWD" \
-  codex "${codex_args[@]}"
-then
+  /bin/cat
+)" || exit 1
+
+if [ -z "$bootstrap_pane" ]; then
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
   exit 1
 fi
 
@@ -439,6 +440,28 @@ fi
 
 # Do not preserve a dead pane even when the user's global tmux setting does.
 if ! tmux set-option -w -t "$session" remain-on-exit off; then
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+codex_pane="$(tmux split-window \
+  -d \
+  -P \
+  -F '#{pane_id}' \
+  -t "$bootstrap_pane" \
+  -c "$PWD" \
+  codex "${codex_args[@]}"
+)" || {
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  exit 1
+}
+
+if [ -z "$codex_pane" ]; then
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+if ! tmux kill-pane -t "$bootstrap_pane"; then
   tmux kill-session -t "$session" >/dev/null 2>&1 || true
   exit 1
 fi

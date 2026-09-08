@@ -58,7 +58,7 @@ cxt --ks
 cxt -c 'tui.keymap.global.open_transcript="alt-t"'
 ```
 
-tmux로 시작한 새 cxt 창은 터미널 출력도 더 오래 볼 수 있도록 window 단위 `history-limit`을 50,000줄로 설정합니다. 사용자 전역 tmux 설정은 변경하지 않습니다. tmux가 없는 환경에서는 터미널 자체의 스크롤백 한도를 따르지만, `Ctrl+T` transcript는 저장된 Codex 대화를 별도로 보여줍니다.
+tmux로 시작한 새 cxt 창은 터미널 출력도 더 오래 볼 수 있도록 첫 Codex pane을 만들기 전에 window 단위 `history-limit`을 50,000줄로 설정합니다. 사용자 전역 tmux 설정은 변경하지 않습니다. tmux가 없는 환경에서는 터미널 자체의 스크롤백 한도를 따르지만, `Ctrl+T` transcript는 저장된 Codex 대화를 별도로 보여줍니다.
 
 ## tmux 세션 관리
 
@@ -99,9 +99,10 @@ cxt --kill-session=<Tab>
 | `--terra` | `--model gpt-5.6-terra` |
 | `--luna` | `--model gpt-5.6-luna` |
 | `--gpt55` | `--model gpt-5.5` |
-| `--gpt54` | `--model gpt-5.4` |
 | `--mini` | `--model gpt-5.4-mini` |
 | `--spark` | `--model gpt-5.3-codex-spark` |
+
+현재 list-visible 모델 카탈로그에서 빠진 `--gpt54` 별칭은 더 이상 안내하지 않으며, 사용하면 종료 코드 `2`와 마이그레이션 안내를 반환합니다. 계정에서 `gpt-5.4`를 계속 노출한다면 Codex 네이티브 옵션 `--model gpt-5.4`를 직접 사용할 수 있습니다.
 
 생각 레벨은 `--low`, `--medium`, `--high`, `--xhigh`, `--max`, `--ultra`를 지원하며 각각 `model_reasoning_effort` 설정으로 변환됩니다. 선택한 모델이 해당 레벨을 지원하지 않으면 Codex가 오류를 반환합니다.
 
@@ -109,7 +110,7 @@ cxt --kill-session=<Tab>
 
 | cxt 옵션 | Sandbox | Approval |
 | --- | --- | --- |
-| `--safe` | `read-only` | `untrusted` |
+| `--safe` | `read-only` | `on-request` |
 | `--auto` | `workspace-write` | `on-request` |
 | `--full-auto` | `workspace-write` | `never` |
 | `--madmax` | 없음 (`--yolo`) | 없음 (`--yolo`) |

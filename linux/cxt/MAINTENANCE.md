@@ -4,10 +4,12 @@
 
 ## 마지막 검토 기준
 
-- 검토일: 2026-07-20
-- Codex CLI: `codex-cli 0.144.6`
-- 로컬 모델 카탈로그 client version: `0.144.1`
-- 공식 기준: [Codex manual](https://developers.openai.com/codex/codex-manual.md), 현재 CLI 도움말, 현재 사용자에게 노출된 로컬 모델 카탈로그
+- 검토일: 2026-09-08
+- Codex CLI: `codex-cli 0.153.4`
+- 로컬 모델 카탈로그 client version: `0.153.4`
+- 공식 기준: [Codex configuration reference](https://developers.openai.com/codex/config-reference), 현재 CLI 도움말, 현재 사용자에게 노출된 로컬 모델 카탈로그
+
+이번 기준점에서 `gpt-5.4`는 list-visible 카탈로그에 없으므로 `--gpt54` 별칭을 retired 처리했습니다. 또한 현재 CLI 플래그 파서는 `--ask-for-approval`에 `on-request`와 `never`만 허용하므로, `--safe`는 `read-only + on-request`로 검증합니다. 설정 파일이 지원하는 값과 CLI 플래그가 실제로 받는 값이 다를 수 있으므로 둘을 구분해 확인합니다.
 
 이 값은 호환성 보장이 아니라 다음 점검에서 차이를 찾기 위한 기준점입니다. 유지보수 작업을 마칠 때 검토일과 버전을 현재 확인값으로 갱신합니다.
 
