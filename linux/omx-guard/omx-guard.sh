@@ -2,13 +2,14 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="2.1.1"
+VERSION="2.2.0"
 OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
 HOME_DIR="${HOME:?HOME is not set}"
 CODEX_HOME="${CODEX_HOME:-$HOME_DIR/.codex}"
 STATE_ROOT="${OMX_GUARD_STATE_HOME:-${XDG_STATE_HOME:-$HOME_DIR/.local/state}/omx-guard}"
 SNAPSHOT_ROOT="$STATE_ROOT/snapshots"
 NPM_PREFIXES="${OMX_GUARD_NPM_PREFIXES:-/usr/local:/opt/homebrew:/home/linuxbrew/.linuxbrew:/usr}"
+LAST_SNAPSHOT_ID=""
 
 blue()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
@@ -287,13 +288,12 @@ if active_path is not None:
 packages = []
 removable_paths = set()
 paired_binary_paths = set()
+ambiguous_paths = set()
+valid_packages = set()
 installed_version = None
 npm_prefix = None
 
-for package, bins in sorted(package_candidates.items(), key=lambda item: str(item[0])):
-    if not (package.exists() or package.is_symlink()):
-        continue
-    version = None
+def package_identity(package):
     package_json_candidates = [
         package / "package.json",
         package / "lib" / "node_modules" / "oh-my-codex" / "package.json",
@@ -303,16 +303,48 @@ for package, bins in sorted(package_candidates.items(), key=lambda item: str(ite
             continue
         try:
             data = json.loads(package_json.read_text(encoding="utf-8"))
-            if data.get("name") in {None, "oh-my-codex"}:
-                version = data.get("version")
         except (OSError, json.JSONDecodeError):
-            pass
-        if version is not None:
-            break
+            continue
+        if isinstance(data, dict) and data.get("name") == "oh-my-codex":
+            return True, data.get("version")
+    return False, None
+
+def binary_points_to_package(binary, package):
+    if not binary.is_symlink():
+        return False
+    try:
+        resolved_binary = binary.resolve(strict=False)
+        resolved_package = package.resolve(strict=False)
+    except OSError:
+        return False
+    return resolved_binary == resolved_package or resolved_package in resolved_binary.parents
+
+for package, bins in sorted(package_candidates.items(), key=lambda item: str(item[0])):
+    if not (package.exists() or package.is_symlink()):
+        continue
+
+    identity_matches, version = package_identity(package)
+    if not identity_matches:
+        ambiguous_paths.add(str(package))
+        ambiguous_paths.update(
+            str(binary)
+            for binary in bins
+            if binary.exists() or binary.is_symlink()
+        )
+        continue
+
+    valid_packages.add(package)
     present_bins = sorted(
         str(binary)
         for binary in bins
-        if binary.exists() or binary.is_symlink()
+        if (binary.exists() or binary.is_symlink())
+        and binary_points_to_package(binary, package)
+    )
+    ambiguous_paths.update(
+        str(binary)
+        for binary in bins
+        if (binary.exists() or binary.is_symlink())
+        and str(binary) not in present_bins
     )
     packages.append({
         "path": str(package),
@@ -341,14 +373,21 @@ for binary in sorted(all_binary_candidates, key=str):
         continue
     if not (binary.exists() or binary.is_symlink()):
         continue
-    try:
-        resolved = binary.resolve()
-        belongs_to_omx = "oh-my-codex" in resolved.parts
-    except OSError:
-        belongs_to_omx = False
-    if belongs_to_omx:
+
+    matching_packages = [
+        package
+        for package in package_candidates
+        if (
+            package in valid_packages
+            or not (package.exists() or package.is_symlink())
+        )
+        and binary_points_to_package(binary, package)
+    ]
+    if matching_packages:
         binary_only.append(binary_text)
         removable_paths.add(binary_text)
+    else:
+        ambiguous_paths.add(binary_text)
 
 result = {
     "schema_version": 1,
@@ -358,6 +397,7 @@ result = {
     "npm_prefix": npm_prefix,
     "packages": packages,
     "binary_only": binary_only,
+    "ambiguous_paths": sorted(ambiguous_paths - removable_paths),
     "removable_paths": sorted(removable_paths),
     "scan_roots": sorted(str(root) for root in scan_roots),
     "path_roots": {
@@ -386,14 +426,17 @@ snapshot_create() {
 
   log "스냅샷 생성: $label"
 
-  HOME_DIR="$HOME_DIR" \
-  CODEX_HOME="$CODEX_HOME" \
-  SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
-  SNAPSHOT_LABEL="$label" \
-  PROJECT_FILE="$project_file" \
-  OMX_DISCOVERY_FILE="$discovery_file" \
-  OS_NAME="$OS_NAME" \
-  python3 <<'PY'
+  local created_snapshot
+  created_snapshot="$(
+    HOME_DIR="$HOME_DIR" \
+    CODEX_HOME="$CODEX_HOME" \
+    STATE_ROOT="$STATE_ROOT" \
+    SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
+    SNAPSHOT_LABEL="$label" \
+    PROJECT_FILE="$project_file" \
+    OMX_DISCOVERY_FILE="$discovery_file" \
+    OS_NAME="$OS_NAME" \
+    python3 <<'PY'
 from __future__ import annotations
 
 from pathlib import Path
@@ -404,24 +447,15 @@ import os
 import platform
 import shutil
 import sys
+import tempfile
 
 home = Path(os.environ["HOME_DIR"]).expanduser().resolve()
 codex_home = Path(os.environ["CODEX_HOME"]).expanduser().resolve()
 snapshot_root = Path(os.environ["SNAPSHOT_ROOT"]).expanduser().resolve()
+state_root = Path(os.environ["STATE_ROOT"]).expanduser().resolve()
 label = os.environ["SNAPSHOT_LABEL"]
 project_file = Path(os.environ["PROJECT_FILE"])
 discovery_file = Path(os.environ["OMX_DISCOVERY_FILE"])
-
-stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-snapshot_id = f"{stamp}-{label}"
-snapshot_dir = snapshot_root / snapshot_id
-suffix = 1
-while snapshot_dir.exists():
-    snapshot_dir = snapshot_root / f"{snapshot_id}-{suffix}"
-    suffix += 1
-
-payload_dir = snapshot_dir / "payload"
-payload_dir.mkdir(parents=True)
 
 tracked = [
     codex_home / "config.toml",
@@ -440,27 +474,63 @@ tracked = [
 ]
 
 projects = []
+project_paths = []
 if project_file.exists():
     for raw in project_file.read_text(encoding="utf-8").splitlines():
         raw = raw.strip()
         if not raw:
             continue
         root = Path(raw).expanduser().resolve()
+        project_paths.append(root)
         projects.append(str(root))
         tracked.extend([
             root / ".omx",
             root / ".codex",
         ])
 
-# Preserve order while removing duplicates.
-seen = set()
-unique_tracked = []
-for path in tracked:
-    key = str(path)
-    if key in seen:
-        continue
-    seen.add(key)
-    unique_tracked.append(path)
+def contains(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+if len(set(projects)) != len(projects):
+    raise SystemExit("동일한 project 경로를 중복 지정할 수 없습니다.")
+
+for index, project in enumerate(project_paths):
+    if contains(project, home):
+        raise SystemExit(f"project가 HOME과 같거나 HOME의 상위 경로입니다: {project}")
+    for protected_name, protected in (
+        ("CODEX_HOME", codex_home),
+        ("OMX Guard state root", state_root),
+        ("snapshot root", snapshot_root),
+    ):
+        if contains(project, protected) or contains(protected, project):
+            raise SystemExit(f"project가 {protected_name}과 중첩됩니다: {project}")
+    for other in project_paths[index + 1:]:
+        if contains(project, other) or contains(other, project):
+            raise SystemExit(f"project 경로가 서로 중첩됩니다: {project} / {other}")
+
+for index, path in enumerate(tracked):
+    for other in tracked[index + 1:]:
+        if contains(path, other) or contains(other, path):
+            raise SystemExit(f"백업 대상 경로가 중복 또는 중첩됩니다: {path} / {other}")
+
+stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+snapshot_id = f"{stamp}-{label}"
+snapshot_dir = snapshot_root / snapshot_id
+suffix = 1
+while snapshot_dir.exists():
+    snapshot_dir = snapshot_root / f"{snapshot_id}-{suffix}"
+    suffix += 1
+
+partial_dir = Path(tempfile.mkdtemp(
+    prefix=f".partial-{snapshot_dir.name}-",
+    dir=str(snapshot_root),
+))
+payload_dir = partial_dir / "payload"
+payload_dir.mkdir()
 
 def copy_item(src: Path, dst: Path) -> str:
     if src.is_symlink():
@@ -474,59 +544,154 @@ def copy_item(src: Path, dst: Path) -> str:
     shutil.copy2(src, dst, follow_symlinks=False)
     return "file"
 
+def payload_digest(path: Path, kind: str):
+    digest = hashlib.sha256()
+    size = 0
+
+    def add_record(record_kind: str, relative: str, value: bytes = b""):
+        nonlocal size
+        header = (
+            record_kind.encode("ascii") + b"\0"
+            + relative.encode("utf-8", "surrogateescape") + b"\0"
+        )
+        digest.update(header)
+        digest.update(value)
+        digest.update(b"\0")
+        size += len(value)
+
+    if kind == "symlink":
+        add_record("symlink", ".", os.fsencode(os.readlink(path)))
+    elif kind == "file":
+        add_record("file", ".")
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+    else:
+        add_record("directory", ".")
+        for root, dirnames, filenames in os.walk(path, topdown=True, followlinks=False):
+            root_path = Path(root)
+            names = sorted(dirnames + filenames)
+            dirnames[:] = sorted(dirnames)
+            for name in names:
+                item = root_path / name
+                relative = str(item.relative_to(path))
+                if item.is_symlink():
+                    add_record("symlink", relative, os.fsencode(os.readlink(item)))
+                    if name in dirnames:
+                        dirnames.remove(name)
+                elif item.is_dir():
+                    add_record("directory", relative)
+                elif item.is_file():
+                    add_record("file", relative)
+                    with item.open("rb") as handle:
+                        while True:
+                            chunk = handle.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                            size += len(chunk)
+                else:
+                    raise RuntimeError(f"지원하지 않는 payload 항목입니다: {item}")
+    return digest.hexdigest(), size
+
 entries = []
-for index, path in enumerate(unique_tracked):
-    exists = path.exists() or path.is_symlink()
-    entry = {
-        "path": str(path),
-        "existed": exists,
-        "archive_name": None,
-        "kind": None,
+try:
+    for index, path in enumerate(tracked):
+        exists = path.exists() or path.is_symlink()
+        entry = {
+            "path": str(path),
+            "existed": exists,
+            "archive_name": None,
+            "kind": None,
+            "sha256": None,
+            "size_bytes": None,
+        }
+        if exists:
+            archive_name = f"entry-{index:03d}"
+            archived = payload_dir / archive_name
+            kind = copy_item(path, archived)
+            digest, size = payload_digest(archived, kind)
+            entry.update({
+                "archive_name": archive_name,
+                "kind": kind,
+                "sha256": digest,
+                "size_bytes": size,
+            })
+        entries.append(entry)
+
+    omx_discovery = json.loads(discovery_file.read_text(encoding="utf-8"))
+    if omx_discovery.get("schema_version") != 1:
+        raise RuntimeError("unsupported OMX discovery schema")
+
+    manifest = {
+        "format_version": 2,
+        "snapshot_id": snapshot_dir.name,
+        "created_at": datetime.now().astimezone().isoformat(),
+        "label": label,
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+        "home": str(home),
+        "codex_home": str(codex_home),
+        "projects": projects,
+        "sensitive_data": {
+            "classification": "private-local-recovery",
+            "contains_sensitive_data": True,
+            "may_include": [
+                "$HOME/.omx authentication and runtime state",
+                "selected project .omx and .codex authentication or runtime state",
+                "Codex configuration, prompts, skills, plugins, commands, and rules",
+            ],
+            "sharing": "do-not-share-without-review",
+        },
+        "omx": {
+            "command_path": omx_discovery.get("active_command"),
+            "installed": bool(omx_discovery.get("installed")),
+            "installed_version": omx_discovery.get("installed_version"),
+            "npm_prefix": omx_discovery.get("npm_prefix"),
+            "discovery": omx_discovery,
+        },
+        "entries": entries,
     }
-    if exists:
-        archive_name = f"entry-{index:03d}"
-        kind = copy_item(path, payload_dir / archive_name)
-        entry["archive_name"] = archive_name
-        entry["kind"] = kind
-    entries.append(entry)
 
-omx_discovery = json.loads(discovery_file.read_text(encoding="utf-8"))
-if omx_discovery.get("schema_version") != 1:
-    raise RuntimeError("unsupported OMX discovery schema")
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    (partial_dir / "manifest.json").write_bytes(manifest_bytes)
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    (partial_dir / "manifest.sha256").write_text(
+        manifest_digest + "\n",
+        encoding="ascii",
+    )
 
-manifest = {
-    "format_version": 1,
-    "snapshot_id": snapshot_dir.name,
-    "created_at": datetime.now().astimezone().isoformat(),
-    "label": label,
-    "platform": {
-        "system": platform.system(),
-        "release": platform.release(),
-        "machine": platform.machine(),
-        "python": platform.python_version(),
-    },
-    "home": str(home),
-    "codex_home": str(codex_home),
-    "projects": projects,
-    "omx": {
-        "command_path": omx_discovery.get("active_command"),
-        "installed": bool(omx_discovery.get("installed")),
-        "installed_version": omx_discovery.get("installed_version"),
-        "npm_prefix": omx_discovery.get("npm_prefix"),
-        "discovery": omx_discovery,
-    },
-    "entries": entries,
-}
+    for entry in entries:
+        if not entry["existed"]:
+            continue
+        archived = payload_dir / entry["archive_name"]
+        actual_digest, actual_size = payload_digest(archived, entry["kind"])
+        if actual_digest != entry["sha256"] or actual_size != entry["size_bytes"]:
+            raise RuntimeError(f"snapshot payload self-check failed: {entry['path']}")
 
-(snapshot_dir / "manifest.json").write_text(
-    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-    encoding="utf-8",
-)
+    partial_dir.rename(snapshot_dir)
+except BaseException:
+    if partial_dir.exists():
+        shutil.rmtree(partial_dir)
+    raise
 
 print(snapshot_dir.name)
 PY
+  )"
 
   rm -f "$project_file" "$discovery_file"
+  LAST_SNAPSHOT_ID="$created_snapshot"
+  printf '%s\n' "$created_snapshot"
 }
 
 snapshot_list() {
@@ -601,6 +766,7 @@ if (
     not candidate.is_symlink()
     and candidate.is_dir()
     and candidate.parent == root
+    and not (candidate / "manifest.json").is_symlink()
     and (candidate / "manifest.json").is_file()
 ):
     print(candidate.resolve())
@@ -628,11 +794,12 @@ PY
 
 remove_npm_installations() {
   local snapshot_manifest="${1:-}"
+  local restore_plan="${2:-}"
   local discovery_file
   discovery_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-discovery.XXXXXX")"
   discover_omx_installations > "$discovery_file"
 
-  if [[ -n "$snapshot_manifest" ]]; then
+  if [[ -n "$snapshot_manifest" || -n "$restore_plan" ]]; then
     log "스냅샷 이후 추가된 OMX npm/실행 파일 제거"
   else
     log "OMX npm/실행 파일 제거"
@@ -640,6 +807,7 @@ remove_npm_installations() {
 
   OMX_DISCOVERY_FILE="$discovery_file" \
   SNAPSHOT_MANIFEST="$snapshot_manifest" \
+  RESTORE_PLAN="$restore_plan" \
   python3 <<'PY'
 from pathlib import Path
 import json
@@ -679,6 +847,7 @@ if current.get("schema_version") != 1:
 
 current_paths = path_list(current.get("removable_paths"), "현재 OMX")
 current_roots = path_list(current.get("scan_roots"), "현재 OMX 탐색 루트")
+ambiguous_paths = path_list(current.get("ambiguous_paths", []), "소유권 불명 OMX")
 current_path_roots = path_root_map(
     current.get("path_roots"),
     current_paths,
@@ -686,12 +855,20 @@ current_path_roots = path_root_map(
     "현재 OMX",
 )
 snapshot_manifest = os.environ.get("SNAPSHOT_MANIFEST")
+restore_plan = os.environ.get("RESTORE_PLAN")
 preserved_paths = set()
 eligible_roots = current_roots
 
-if snapshot_manifest:
+if restore_plan:
+    plan = json.loads(Path(restore_plan).read_text(encoding="utf-8"))
+    saved = plan.get("omx", {}).get("discovery")
+elif snapshot_manifest:
     manifest = json.loads(Path(snapshot_manifest).read_text(encoding="utf-8"))
     saved = manifest.get("omx", {}).get("discovery")
+else:
+    saved = None
+
+if restore_plan or snapshot_manifest:
     if (
         not isinstance(saved, dict)
         or saved.get("schema_version") != 1
@@ -727,6 +904,13 @@ targets = sorted(
 )
 skipped = sorted(new_paths - set(targets), key=str)
 
+for target in sorted(ambiguous_paths, key=str):
+    print(
+        "WARN: OMX 소유권을 입증할 수 없어 경로를 보존합니다: "
+        f"{target}",
+        file=sys.stderr,
+    )
+
 for target in skipped:
     print(
         "WARN: 스냅샷 당시 탐색하지 않은 루트의 OMX 경로를 보존합니다: "
@@ -758,6 +942,7 @@ clean_codex_config() {
 
   CONFIG_FILE="$config_file" python3 <<'PY'
 from pathlib import Path
+import json
 import os
 import re
 import stat
@@ -767,52 +952,173 @@ path = Path(os.environ["CONFIG_FILE"])
 text = path.read_text(encoding="utf-8")
 lines = text.splitlines(keepends=True)
 
-header_re = re.compile(r'^\s*\[([^\]]+)\]\s*(?:#.*)?$')
+try:
+    import tomllib as toml_parser
+except ModuleNotFoundError:
+    try:
+        import tomli as toml_parser
+    except ModuleNotFoundError:
+        toml_parser = None
 
-def is_omx_section(name: str) -> bool:
-    name = name.strip()
+if toml_parser is not None:
+    toml_parser.loads(text)
+
+def parse_dotted_key(raw):
+    parts = []
+    index = 0
+    length = len(raw)
+    while True:
+        while index < length and raw[index].isspace():
+            index += 1
+        if index >= length:
+            return None
+
+        quote = raw[index] if raw[index] in {'"', "'"} else None
+        if quote is not None:
+            index += 1
+            start = index
+            escaped = False
+            while index < length:
+                char = raw[index]
+                if quote == '"' and char == "\\":
+                    escaped = True
+                    index += 2
+                    continue
+                if char == quote:
+                    break
+                index += 1
+            if index >= length:
+                return None
+            token = raw[start:index]
+            index += 1
+            if escaped:
+                try:
+                    token = json.loads(f'"{token}"')
+                except (TypeError, ValueError):
+                    return None
+        else:
+            match = re.match(r"[A-Za-z0-9_-]+", raw[index:])
+            if match is None:
+                return None
+            token = match.group(0)
+            index += len(token)
+
+        parts.append(token)
+        while index < length and raw[index].isspace():
+            index += 1
+        if index == length:
+            return parts
+        if raw[index] != ".":
+            return None
+        index += 1
+
+def table_header_parts(line):
+    stripped = line.lstrip().rstrip("\r\n")
+    if not stripped.startswith("[") or stripped.startswith("[["):
+        return None
+
+    quote = None
+    escaped = False
+    for index in range(1, len(stripped)):
+        char = stripped[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if quote == "'":
+            if char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char == "]":
+            tail = stripped[index + 1:].strip()
+            if tail and not tail.startswith("#"):
+                return None
+            return parse_dotted_key(stripped[1:index])
+    return None
+
+def advance_multiline_state(line, state):
+    index = 0
+    length = len(line)
+    while index < length:
+        if state is not None:
+            found = line.find(state, index)
+            if found < 0:
+                return state
+            if state == '\"\"\"':
+                backslashes = 0
+                cursor = found - 1
+                while cursor >= 0 and line[cursor] == "\\":
+                    backslashes += 1
+                    cursor -= 1
+                if backslashes % 2 == 1:
+                    index = found + 3
+                    continue
+            state = None
+            index = found + 3
+            continue
+
+        if line[index] == "#":
+            return state
+        if line.startswith('\"\"\"', index) or line.startswith("'''", index):
+            state = line[index:index + 3]
+            index += 3
+            continue
+        if line[index] == '"':
+            index += 1
+            while index < length:
+                if line[index] == "\\":
+                    index += 2
+                elif line[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            continue
+        if line[index] == "'":
+            closing = line.find("'", index + 1)
+            index = length if closing < 0 else closing + 1
+            continue
+        index += 1
+    return state
+
+def is_owned_omx_section(parts):
+    if not parts or len(parts) < 2:
+        return False
     return (
-        name.startswith("mcp_servers.omx_")
-        or name == "marketplaces.oh-my-codex-local"
-        or name.startswith("marketplaces.oh-my-codex-local.")
-        or name == 'plugins."oh-my-codex@oh-my-codex-local"'
-        or name.startswith('plugins."oh-my-codex@oh-my-codex-local".')
+        (parts[0] == "mcp_servers" and parts[1].startswith("omx_"))
+        or (parts[0] == "marketplaces" and parts[1] == "oh-my-codex-local")
+        or (parts[0] == "plugins" and parts[1] == "oh-my-codex@oh-my-codex-local")
     )
 
 out = []
 skip = False
+multiline_state = None
+removed_sections = []
 
 for line in lines:
-    match = header_re.match(line.rstrip("\n"))
-    if match:
-        skip = is_omx_section(match.group(1))
+    parts = table_header_parts(line) if multiline_state is None else None
+    if parts is not None:
+        skip = is_owned_omx_section(parts)
         if skip:
-            continue
+            removed_sections.append(".".join(parts))
+    if not skip:
+        out.append(line)
+    multiline_state = advance_multiline_state(line, multiline_state)
 
-    if skip:
-        continue
-
-    if re.match(r'^\s*#.*(?:OMX|oh-my-codex)', line, re.IGNORECASE):
-        continue
-
-    if "oh-my-codex@oh-my-codex-local" in line:
-        continue
-
-    if re.search(r'/node_modules/oh-my-codex/', line):
-        continue
-
-    out.append(line)
+if not removed_sections:
+    print(f"unchanged: {path} (입증된 OMX table 없음)")
+    raise SystemExit(0)
 
 cleaned = "".join(out)
-cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip() + "\n"
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    tomllib = None
-
-if tomllib is not None:
-    tomllib.loads(cleaned)
+if toml_parser is not None:
+    toml_parser.loads(cleaned)
 
 mode = stat.S_IMODE(path.stat().st_mode)
 temp_path = None
@@ -834,7 +1140,7 @@ finally:
     if temp_path is not None and temp_path.exists():
         temp_path.unlink()
 
-print(f"cleaned: {path}")
+print(f"cleaned: {path} ({len(removed_sections)}개 OMX table 제거)")
 PY
 
   validate_toml "$config_file"
@@ -851,13 +1157,19 @@ import sys
 
 path = Path(os.environ["CONFIG_FILE"])
 try:
-    import tomllib
+    import tomllib as toml_parser
 except ModuleNotFoundError:
-    print("WARN: Python 3.11 미만이라 TOML 문법 검사를 건너뜁니다.")
-    raise SystemExit(0)
+    try:
+        import tomli as toml_parser
+    except ModuleNotFoundError:
+        print(
+            "WARN: tomllib/tomli가 없어 TOML 전체 문법 검사는 생략했습니다. "
+            "remove는 입증된 table 경계만 byte-preserving 방식으로 수정합니다."
+        )
+        raise SystemExit(0)
 
 with path.open("rb") as fp:
-    tomllib.load(fp)
+    toml_parser.load(fp)
 
 print("OK: config.toml TOML 문법 정상")
 PY
@@ -967,11 +1279,14 @@ data = json.loads(
     Path(os.environ["OMX_DISCOVERY_FILE"]).read_text(encoding="utf-8")
 )
 found = data.get("removable_paths", [])
+ambiguous = data.get("ambiguous_paths", [])
 if found:
     for path in found:
         print(path)
-else:
+elif not ambiguous:
     print("OK: 알려진 Node 관리 경로에 OMX 없음")
+for path in ambiguous:
+    print(f"WARN: OMX 소유권 불명, 자동 제거하지 않음: {path}")
 PY
   rm -f "$discovery_file"
 
@@ -1076,52 +1391,118 @@ restore_command() {
 
   [[ -f "$manifest" ]] || die "manifest.json이 없습니다: $snapshot_dir"
 
-  log "스냅샷 경로/환경 검증"
-  HOME_DIR="$HOME_DIR" CODEX_HOME="$CODEX_HOME" MANIFEST="$manifest" python3 <<'PY'
+  local restore_project_file restore_plan_file restore_plan
+  restore_project_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-restore-projects.XXXXXX")"
+  restore_plan_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-restore-plan.XXXXXX")"
+
+  log "스냅샷 무결성/경로 검증 및 복구 계획 생성"
+  HOME_DIR="$HOME_DIR" \
+  CODEX_HOME="$CODEX_HOME" \
+  STATE_ROOT="$STATE_ROOT" \
+  SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
+  SNAPSHOT_DIR="$snapshot_dir" \
+  PROJECT_OUTPUT="$restore_project_file" \
+  PLAN_OUTPUT="$restore_plan_file" \
+  python3 <<'PY'
 from pathlib import Path
+from datetime import datetime
+import hashlib
 import json
 import os
+import re
+import stat
+import tempfile
+import uuid
 
-manifest_path = Path(os.environ["MANIFEST"]).resolve()
-snapshot_dir = manifest_path.parent
-payload = snapshot_dir / "payload"
-data = json.loads(manifest_path.read_text(encoding="utf-8"))
-current_home = str(Path(os.environ["HOME_DIR"]).expanduser().resolve())
-current_codex = str(Path(os.environ["CODEX_HOME"]).expanduser().resolve())
+home = Path(os.environ["HOME_DIR"]).expanduser().resolve()
+codex_home = Path(os.environ["CODEX_HOME"]).expanduser().resolve()
+state_root = Path(os.environ["STATE_ROOT"]).expanduser().resolve()
+snapshot_root = Path(os.environ["SNAPSHOT_ROOT"]).expanduser().resolve()
+raw_snapshot_dir = Path(os.environ["SNAPSHOT_DIR"])
+project_output = Path(os.environ["PROJECT_OUTPUT"])
+plan_output = Path(os.environ["PLAN_OUTPUT"])
 
-if data.get("format_version") != 1:
+if raw_snapshot_dir.is_symlink():
+    raise SystemExit("symlink 스냅샷 디렉터리는 복구할 수 없습니다.")
+snapshot_dir = raw_snapshot_dir.resolve()
+if snapshot_dir.parent != snapshot_root:
+    raise SystemExit("스냅샷 루트 밖의 경로는 복구할 수 없습니다.")
+
+manifest_path = snapshot_dir / "manifest.json"
+if manifest_path.is_symlink() or not manifest_path.is_file():
+    raise SystemExit("manifest.json이 없거나 안전하지 않습니다.")
+manifest_bytes = manifest_path.read_bytes()
+manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+try:
+    data = json.loads(manifest_bytes.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"manifest.json을 읽을 수 없습니다: {error}")
+
+format_version = data.get("format_version")
+if format_version not in {1, 2}:
     raise SystemExit("지원하지 않는 스냅샷 manifest 형식입니다.")
+
+legacy_limited = format_version == 1
+if legacy_limited:
+    print(
+        "WARN: format 1 스냅샷은 payload checksum이 없는 제한 모드로 복구합니다.",
+        file=os.sys.stderr,
+    )
+else:
+    checksum_path = snapshot_dir / "manifest.sha256"
+    if checksum_path.is_symlink() or not checksum_path.is_file():
+        raise SystemExit("manifest.sha256이 없거나 안전하지 않습니다.")
+    expected_manifest_sha = checksum_path.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha):
+        raise SystemExit("manifest.sha256 형식이 올바르지 않습니다.")
+    if expected_manifest_sha != manifest_sha256:
+        raise SystemExit("manifest.json checksum이 일치하지 않습니다.")
+    sensitive = data.get("sensitive_data")
+    if not isinstance(sensitive, dict) or sensitive.get("contains_sensitive_data") is not True:
+        raise SystemExit("민감 데이터 취급 정책이 manifest에 명시되지 않았습니다.")
 
 if data.get("snapshot_id") != snapshot_dir.name:
     raise SystemExit("스냅샷 ID와 디렉터리 이름이 일치하지 않습니다.")
-
-if data.get("home") != current_home:
+if data.get("home") != str(home):
     raise SystemExit(
         "스냅샷 HOME과 현재 HOME이 다릅니다. "
-        f"snapshot={data.get('home')} current={current_home}"
+        f"snapshot={data.get('home')} current={home}"
     )
-
-if data.get("codex_home") != current_codex:
+if data.get("codex_home") != str(codex_home):
     raise SystemExit(
         "스냅샷 CODEX_HOME과 현재 CODEX_HOME이 다릅니다. "
-        f"snapshot={data.get('codex_home')} current={current_codex}"
+        f"snapshot={data.get('codex_home')} current={codex_home}"
     )
 
-project_values = data.get("projects", [])
-if not isinstance(project_values, list) or not all(
-    isinstance(project, str) for project in project_values
-):
-    raise SystemExit("스냅샷 projects 형식이 올바르지 않습니다.")
+def contains(parent, child):
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
-projects = [Path(project).expanduser().resolve() for project in project_values]
+project_values = data.get("projects", [])
+if not isinstance(project_values, list) or not all(isinstance(value, str) for value in project_values):
+    raise SystemExit("스냅샷 projects 형식이 올바르지 않습니다.")
+projects = [Path(value).expanduser().resolve() for value in project_values]
 if [str(project) for project in projects] != project_values:
     raise SystemExit("스냅샷 project 경로가 정규화되어 있지 않습니다.")
-
 if len(set(project_values)) != len(project_values):
     raise SystemExit("스냅샷 project 경로가 중복되었습니다.")
+for index, project in enumerate(projects):
+    if contains(project, home):
+        raise SystemExit(f"project가 HOME과 같거나 HOME의 상위 경로입니다: {project}")
+    for protected_name, protected in (
+        ("CODEX_HOME", codex_home),
+        ("OMX Guard state root", state_root),
+        ("snapshot root", snapshot_root),
+    ):
+        if contains(project, protected) or contains(protected, project):
+            raise SystemExit(f"project가 {protected_name}과 중첩됩니다: {project}")
+    for other in projects[index + 1:]:
+        if contains(project, other) or contains(other, project):
+            raise SystemExit(f"project 경로가 서로 중첩됩니다: {project} / {other}")
 
-home = Path(current_home)
-codex_home = Path(current_codex)
 tracked = [
     codex_home / "config.toml",
     codex_home / "AGENTS.md",
@@ -1140,44 +1521,106 @@ tracked = [
 for project in projects:
     tracked.extend([project / ".omx", project / ".codex"])
 
-expected_paths = []
-seen = set()
-for path in tracked:
-    key = str(path)
-    if key in seen:
-        continue
-    seen.add(key)
-    expected_paths.append(path)
+if legacy_limited:
+    expected_paths = []
+    seen = set()
+    for path in tracked:
+        if str(path) not in seen:
+            seen.add(str(path))
+            expected_paths.append(path)
+else:
+    expected_paths = tracked
+    for index, path in enumerate(expected_paths):
+        for other in expected_paths[index + 1:]:
+            if contains(path, other) or contains(other, path):
+                raise SystemExit(f"복구 경로가 중복 또는 중첩됩니다: {path} / {other}")
+
+payload = snapshot_dir / "payload"
+if payload.is_symlink() or not payload.is_dir():
+    raise SystemExit("스냅샷 payload 디렉터리가 없거나 안전하지 않습니다.")
+
+def payload_digest(path, kind):
+    digest = hashlib.sha256()
+    size = 0
+
+    def add_record(record_kind, relative, value=b""):
+        nonlocal size
+        digest.update(record_kind.encode("ascii") + b"\0")
+        digest.update(relative.encode("utf-8", "surrogateescape") + b"\0")
+        digest.update(value)
+        digest.update(b"\0")
+        size += len(value)
+
+    if kind == "symlink":
+        add_record("symlink", ".", os.fsencode(os.readlink(path)))
+    elif kind == "file":
+        add_record("file", ".")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+    else:
+        add_record("directory", ".")
+        for root, dirnames, filenames in os.walk(path, topdown=True, followlinks=False):
+            root_path = Path(root)
+            names = sorted(dirnames + filenames)
+            dirnames[:] = sorted(dirnames)
+            for name in names:
+                item = root_path / name
+                relative = str(item.relative_to(path))
+                if item.is_symlink():
+                    add_record("symlink", relative, os.fsencode(os.readlink(item)))
+                    if name in dirnames:
+                        dirnames.remove(name)
+                elif item.is_dir():
+                    add_record("directory", relative)
+                elif item.is_file():
+                    add_record("file", relative)
+                    with item.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                            size += len(chunk)
+                else:
+                    raise SystemExit(f"지원하지 않는 payload 항목입니다: {item}")
+    return digest.hexdigest(), size
 
 entries = data.get("entries")
 if not isinstance(entries, list) or len(entries) != len(expected_paths):
     raise SystemExit("스냅샷 entries 개수가 추적 경로와 일치하지 않습니다.")
 
-if not payload.is_dir() or payload.is_symlink():
-    raise SystemExit("스냅샷 payload 디렉터리가 없거나 안전하지 않습니다.")
-
+plan_entries = []
 for index, (entry, expected_path) in enumerate(zip(entries, expected_paths)):
-    if not isinstance(entry, dict):
-        raise SystemExit(f"스냅샷 entry 형식이 올바르지 않습니다: {index}")
-    if entry.get("path") != str(expected_path):
-        raise SystemExit(f"허용되지 않은 복구 경로입니다: {entry.get('path')}")
-
+    if not isinstance(entry, dict) or entry.get("path") != str(expected_path):
+        raise SystemExit(f"허용되지 않은 복구 경로입니다: {entry.get('path') if isinstance(entry, dict) else entry}")
     existed = entry.get("existed")
     if not isinstance(existed, bool):
         raise SystemExit(f"스냅샷 existed 값이 올바르지 않습니다: {expected_path}")
 
+    planned = {
+        "index": index,
+        "destination": str(expected_path),
+        "existed": existed,
+        "source": None,
+        "kind": None,
+        "sha256": None,
+        "size_bytes": None,
+        "stage": None,
+        "backup": None,
+        "state": "validated",
+    }
     if not existed:
-        if entry.get("archive_name") is not None or entry.get("kind") is not None:
+        absent_fields = ["archive_name", "kind"]
+        if not legacy_limited:
+            absent_fields.extend(["sha256", "size_bytes"])
+        if any(entry.get(field) is not None for field in absent_fields):
             raise SystemExit(f"존재하지 않은 경로의 payload 정보가 올바르지 않습니다: {expected_path}")
+        plan_entries.append(planned)
         continue
 
     archive_name = f"entry-{index:03d}"
     kind = entry.get("kind")
-    if entry.get("archive_name") != archive_name:
-        raise SystemExit(f"스냅샷 archive 이름이 올바르지 않습니다: {expected_path}")
-    if kind not in {"file", "directory", "symlink"}:
-        raise SystemExit(f"스냅샷 payload 종류가 올바르지 않습니다: {expected_path}")
-
+    if entry.get("archive_name") != archive_name or kind not in {"file", "directory", "symlink"}:
+        raise SystemExit(f"스냅샷 payload 메타데이터가 올바르지 않습니다: {expected_path}")
     source = payload / archive_name
     if kind == "symlink" and not source.is_symlink():
         raise SystemExit(f"스냅샷 symlink payload가 없습니다: {expected_path}")
@@ -1185,78 +1628,393 @@ for index, (entry, expected_path) in enumerate(zip(entries, expected_paths)):
         raise SystemExit(f"스냅샷 directory payload가 없습니다: {expected_path}")
     if kind == "file" and (source.is_symlink() or not source.is_file()):
         raise SystemExit(f"스냅샷 file payload가 없습니다: {expected_path}")
+    digest, size = payload_digest(source, kind)
+    if not legacy_limited:
+        if entry.get("sha256") != digest or entry.get("size_bytes") != size:
+            raise SystemExit(f"스냅샷 payload checksum이 일치하지 않습니다: {expected_path}")
+    planned.update({
+        "source": str(source),
+        "kind": kind,
+        "sha256": digest if legacy_limited else entry.get("sha256"),
+        "size_bytes": size if legacy_limited else entry.get("size_bytes"),
+    })
+    plan_entries.append(planned)
 
-print("OK: 현재 환경, 복구 경로, payload 검증 완료")
+operation_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:12]
+plan_root = state_root / "restore-plans"
+plan_root.mkdir(parents=True, exist_ok=True)
+os.chmod(plan_root, 0o700)
+plan_path = plan_root / f"{operation_id}.json"
+plan = {
+    "plan_version": 1,
+    "operation_id": operation_id,
+    "created_at": datetime.now().astimezone().isoformat(),
+    "updated_at": datetime.now().astimezone().isoformat(),
+    "status": "validated",
+    "snapshot_id": snapshot_dir.name,
+    "snapshot_dir": str(snapshot_dir),
+    "manifest_path": str(manifest_path),
+    "manifest_sha256": manifest_sha256,
+    "format_version": format_version,
+    "legacy_integrity_limited": legacy_limited,
+    "home": str(home),
+    "codex_home": str(codex_home),
+    "projects": project_values,
+    "pre_restore_snapshot": None,
+    "omx": data.get("omx", {}),
+    "entries": plan_entries,
+    "error": None,
+    "rollback_errors": [],
+}
+with tempfile.NamedTemporaryFile(
+    mode="w", encoding="utf-8", dir=str(plan_root), prefix=".plan-", delete=False
+) as handle:
+    temporary = Path(handle.name)
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, plan_path)
+
+project_output.write_text("".join(value + "\n" for value in project_values), encoding="utf-8")
+plan_output.write_text(str(plan_path) + "\n", encoding="utf-8")
+print("OK: 현재 환경, 복구 경로, manifest 및 payload 검증 완료")
+print(f"복구 계획: {plan_path}")
 PY
+
+  restore_plan="$(<"$restore_plan_file")"
+  rm -f "$restore_plan_file"
 
   log "현재 상태 안전 백업"
-  local restore_project_file
-  restore_project_file="$(mktemp "${TMPDIR:-/tmp}/omx-guard-restore-projects.XXXXXX")"
-
-  MANIFEST="$manifest" python3 <<'PY' > "$restore_project_file"
-from pathlib import Path
-import json
-import os
-
-data = json.loads(Path(os.environ["MANIFEST"]).read_text(encoding="utf-8"))
-for project in data.get("projects", []):
-    print(project)
-PY
-
   snapshot_from_project_file "pre-restore" "$restore_project_file"
+  local pre_restore_snapshot="$LAST_SNAPSHOT_ID"
   rm -f "$restore_project_file"
 
-  remove_npm_installations "$manifest"
+  RESTORE_PLAN="$restore_plan" PRE_RESTORE_SNAPSHOT="$pre_restore_snapshot" python3 <<'PY'
+from pathlib import Path
+from datetime import datetime
+import json
+import os
+import tempfile
+
+path = Path(os.environ["RESTORE_PLAN"])
+data = json.loads(path.read_text(encoding="utf-8"))
+data["pre_restore_snapshot"] = os.environ["PRE_RESTORE_SNAPSHOT"]
+data["status"] = "ready"
+data["updated_at"] = datetime.now().astimezone().isoformat()
+with tempfile.NamedTemporaryFile(
+    mode="w", encoding="utf-8", dir=str(path.parent), prefix=".plan-", delete=False
+) as handle:
+    temporary = Path(handle.name)
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+PY
 
   log "스냅샷 복구: $(basename "$snapshot_dir")"
-  SNAPSHOT_DIR="$snapshot_dir" python3 <<'PY'
-from __future__ import annotations
-
+  RESTORE_PLAN="$restore_plan" \
+  TEST_FAIL_STAGE_INDEX="${OMX_GUARD_TEST_RESTORE_FAIL_STAGE_INDEX:-}" \
+  TEST_INTERRUPT_INDEX="${OMX_GUARD_TEST_RESTORE_INTERRUPT_INDEX:-}" \
+  python3 <<'PY'
 from pathlib import Path
+from datetime import datetime
+import errno
+import hashlib
 import json
 import os
 import shutil
+import tempfile
 
-snapshot_dir = Path(os.environ["SNAPSHOT_DIR"])
-manifest = json.loads(
-    (snapshot_dir / "manifest.json").read_text(encoding="utf-8")
-)
-payload = snapshot_dir / "payload"
+plan_path = Path(os.environ["RESTORE_PLAN"])
+if plan_path.is_symlink() or not plan_path.is_file():
+    raise SystemExit("복구 계획 파일이 없거나 안전하지 않습니다.")
+plan = json.loads(plan_path.read_text(encoding="utf-8"))
+operation_id = plan.get("operation_id")
+if not isinstance(operation_id, str) or not operation_id:
+    raise SystemExit("복구 계획 operation ID가 올바르지 않습니다.")
 
-def remove_item(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
+def exists(path):
+    return path.exists() or path.is_symlink()
 
-def restore_item(src: Path, dst: Path, kind: str | None) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+def persist():
+    plan["updated_at"] = datetime.now().astimezone().isoformat()
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=str(plan_path.parent), prefix=".plan-", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        json.dump(plan, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, plan_path)
+
+def payload_digest(path, kind):
+    digest = hashlib.sha256()
+    size = 0
+
+    def add_record(record_kind, relative, value=b""):
+        nonlocal size
+        digest.update(record_kind.encode("ascii") + b"\0")
+        digest.update(relative.encode("utf-8", "surrogateescape") + b"\0")
+        digest.update(value)
+        digest.update(b"\0")
+        size += len(value)
+
     if kind == "symlink":
-        dst.symlink_to(os.readlink(src))
+        add_record("symlink", ".", os.fsencode(os.readlink(path)))
+    elif kind == "file":
+        add_record("file", ".")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+    else:
+        add_record("directory", ".")
+        for root, dirnames, filenames in os.walk(path, topdown=True, followlinks=False):
+            root_path = Path(root)
+            names = sorted(dirnames + filenames)
+            dirnames[:] = sorted(dirnames)
+            for name in names:
+                item = root_path / name
+                relative = str(item.relative_to(path))
+                if item.is_symlink():
+                    add_record("symlink", relative, os.fsencode(os.readlink(item)))
+                    if name in dirnames:
+                        dirnames.remove(name)
+                elif item.is_dir():
+                    add_record("directory", relative)
+                elif item.is_file():
+                    add_record("file", relative)
+                    with item.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                            size += len(chunk)
+                else:
+                    raise RuntimeError(f"지원하지 않는 파일 종류입니다: {item}")
+    return digest.hexdigest(), size
+
+def item_kind(path):
+    if path.is_symlink():
+        return "symlink"
+    if path.is_dir():
+        return "directory"
+    if path.is_file():
+        return "file"
+    if not path.exists():
+        return "absent"
+    raise RuntimeError(f"지원하지 않는 목적지 파일 종류입니다: {path}")
+
+def fingerprint(path):
+    kind = item_kind(path)
+    if kind == "absent":
+        return {"kind": "absent", "sha256": None, "size_bytes": None}
+    digest, size = payload_digest(path, kind)
+    return {"kind": kind, "sha256": digest, "size_bytes": size}
+
+def copy_item(source, destination, kind):
+    if kind == "symlink":
+        destination.symlink_to(os.readlink(source))
     elif kind == "directory":
-        shutil.copytree(src, dst, symlinks=True)
+        shutil.copytree(source, destination, symlinks=True)
     else:
-        shutil.copy2(src, dst, follow_symlinks=False)
+        shutil.copy2(source, destination, follow_symlinks=False)
 
-for entry in manifest.get("entries", []):
-    destination = Path(entry["path"])
-    remove_item(destination)
-
-    if entry.get("existed"):
-        archive_name = entry.get("archive_name")
-        if not archive_name:
-            raise RuntimeError(f"archive_name missing: {destination}")
-        restore_item(
-            payload / archive_name,
-            destination,
-            entry.get("kind"),
-        )
-        print(f"restored: {destination}")
+def move_to_destination(stage, destination, kind, entry):
+    if kind == "file":
+        os.link(stage, destination, follow_symlinks=False)
+        stage.unlink()
+    elif kind == "symlink":
+        destination.symlink_to(os.readlink(stage))
+        stage.unlink()
     else:
-        print(f"restored-absent: {destination}")
+        destination.mkdir(mode=0o700)
+        entry["reservation_inode"] = destination.lstat().st_ino
+        persist()
+        os.rename(stage, destination)
+        entry["reservation_inode"] = None
+
+def validate_snapshot_again():
+    manifest_path = Path(plan["manifest_path"])
+    manifest_bytes = manifest_path.read_bytes()
+    actual_manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    if actual_manifest_sha != plan.get("manifest_sha256"):
+        raise RuntimeError("복구 실행 직전 manifest.json이 변경되었습니다.")
+    if plan.get("format_version") == 2:
+        checksum_path = Path(plan["snapshot_dir"]) / "manifest.sha256"
+        if checksum_path.is_symlink() or checksum_path.read_text(encoding="ascii").strip() != actual_manifest_sha:
+            raise RuntimeError("복구 실행 직전 manifest checksum이 변경되었습니다.")
+    for entry in plan.get("entries", []):
+        if not entry.get("existed"):
+            continue
+        source = Path(entry["source"])
+        actual_kind = item_kind(source)
+        if actual_kind != entry.get("kind"):
+            raise RuntimeError(f"복구 실행 직전 payload 종류가 변경되었습니다: {source}")
+        digest, size = payload_digest(source, actual_kind)
+        if digest != entry.get("sha256") or size != entry.get("size_bytes"):
+            raise RuntimeError(f"복구 실행 직전 payload가 변경되었습니다: {source}")
+
+def rollback():
+    errors = []
+    for entry in reversed(plan.get("entries", [])):
+        destination = Path(entry["destination"])
+        backup = Path(entry["backup"]) if entry.get("backup") else None
+        try:
+            if backup is not None and exists(backup):
+                if exists(destination):
+                    conflict = destination.parent / (
+                        f".{destination.name}.omx-guard-failed-{operation_id}-{entry['index']:03d}"
+                    )
+                    if exists(conflict):
+                        raise RuntimeError(f"rollback 보존 경로가 이미 존재합니다: {conflict}")
+                    os.rename(destination, conflict)
+                    entry["failed_artifact"] = str(conflict)
+                os.rename(backup, destination)
+                entry["state"] = "rolled_back"
+            elif entry.get("state") in {"installed", "applied-absent", "backup-moved"}:
+                if exists(destination):
+                    conflict = destination.parent / (
+                        f".{destination.name}.omx-guard-failed-{operation_id}-{entry['index']:03d}"
+                    )
+                    if exists(conflict):
+                        raise RuntimeError(f"rollback 보존 경로가 이미 존재합니다: {conflict}")
+                    os.rename(destination, conflict)
+                    entry["failed_artifact"] = str(conflict)
+                entry["state"] = "rolled_back"
+            reservation_inode = entry.get("reservation_inode")
+            if reservation_inode is not None and destination.is_dir() and not destination.is_symlink():
+                if destination.lstat().st_ino == reservation_inode:
+                    destination.rmdir()
+                    entry["reservation_inode"] = None
+        except BaseException as error:
+            errors.append(f"{destination}: {error}")
+    plan["rollback_errors"] = errors
+    return errors
+
+try:
+    validate_snapshot_again()
+    plan["status"] = "staging"
+    persist()
+
+    fail_stage = os.environ.get("TEST_FAIL_STAGE_INDEX", "")
+    interrupt_index = os.environ.get("TEST_INTERRUPT_INDEX", "")
+    fail_stage_index = int(fail_stage) if fail_stage else None
+    interrupt_at = int(interrupt_index) if interrupt_index else None
+
+    for entry in plan["entries"]:
+        destination = Path(entry["destination"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        entry["initial_destination"] = fingerprint(destination)
+        entry["backup"] = str(destination.parent / (
+            f".{destination.name}.omx-guard-backup-{operation_id}-{entry['index']:03d}"
+        ))
+        if exists(Path(entry["backup"])):
+            raise RuntimeError(f"복구 backup 경로가 이미 존재합니다: {entry['backup']}")
+        if entry.get("existed"):
+            stage = destination.parent / (
+                f".{destination.name}.omx-guard-stage-{operation_id}-{entry['index']:03d}"
+            )
+            entry["stage"] = str(stage)
+            if exists(stage):
+                raise RuntimeError(f"복구 staging 경로가 이미 존재합니다: {stage}")
+            if fail_stage_index == entry["index"]:
+                raise OSError(errno.ENOSPC, "test-only staging ENOSPC injection", str(stage))
+            copy_item(Path(entry["source"]), stage, entry["kind"])
+            digest, size = payload_digest(stage, entry["kind"])
+            if digest != entry["sha256"] or size != entry["size_bytes"]:
+                raise RuntimeError(f"staged payload checksum이 일치하지 않습니다: {destination}")
+        entry["state"] = "staged"
+        persist()
+
+    for entry in plan["entries"]:
+        destination = Path(entry["destination"])
+        if fingerprint(destination) != entry["initial_destination"]:
+            raise RuntimeError(f"staging 중 복구 목적지가 변경되었습니다: {destination}")
+
+    plan["status"] = "applying"
+    persist()
+    for entry in plan["entries"]:
+        destination = Path(entry["destination"])
+        backup = Path(entry["backup"])
+        try:
+            os.rename(destination, backup)
+            entry["state"] = "backup-moved"
+            persist()
+            if fingerprint(backup) != entry["initial_destination"]:
+                raise RuntimeError(f"교체 직전 복구 목적지가 변경되었습니다: {destination}")
+        except FileNotFoundError:
+            if entry["initial_destination"]["kind"] != "absent":
+                raise RuntimeError(f"교체 직전 복구 목적지가 사라졌습니다: {destination}")
+
+        if entry.get("existed"):
+            move_to_destination(Path(entry["stage"]), destination, entry["kind"], entry)
+            entry["state"] = "installed"
+            print(f"restored: {destination}")
+        else:
+            entry["state"] = "applied-absent"
+            print(f"restored-absent: {destination}")
+        persist()
+        if interrupt_at == entry["index"]:
+            raise KeyboardInterrupt("test-only restore interruption injection")
+
+    config_file = Path(plan["codex_home"]) / "config.toml"
+    if config_file.is_file() and not config_file.is_symlink():
+        try:
+            import tomllib as toml_parser
+        except ModuleNotFoundError:
+            try:
+                import tomli as toml_parser
+            except ModuleNotFoundError:
+                toml_parser = None
+        if toml_parser is not None:
+            with config_file.open("rb") as handle:
+                toml_parser.load(handle)
+
+    plan["status"] = "committing"
+    persist()
+    for entry in plan["entries"]:
+        backup = Path(entry["backup"])
+        if backup.is_symlink() or backup.is_file():
+            backup.unlink()
+        elif backup.is_dir():
+            shutil.rmtree(backup)
+        stage_value = entry.get("stage")
+        if stage_value:
+            stage = Path(stage_value)
+            if stage.is_symlink() or stage.is_file():
+                stage.unlink()
+            elif stage.is_dir():
+                shutil.rmtree(stage)
+        entry["state"] = "committed"
+    plan["status"] = "completed"
+    persist()
+except BaseException as error:
+    plan["error"] = f"{type(error).__name__}: {error}"
+    rollback_errors = rollback()
+    plan["status"] = "rollback-failed" if rollback_errors else "rolled-back"
+    persist()
+    print(f"ERROR: 복구가 실패했습니다: {error}", file=os.sys.stderr)
+    print(f"ERROR: 복구 계획을 보존했습니다: {plan_path}", file=os.sys.stderr)
+    print(
+        f"ERROR: pre-restore 스냅샷: {plan.get('pre_restore_snapshot')}",
+        file=os.sys.stderr,
+    )
+    if rollback_errors:
+        for rollback_error in rollback_errors:
+            print(f"ERROR: rollback 실패: {rollback_error}", file=os.sys.stderr)
+    raise SystemExit(1)
 PY
 
+  remove_npm_installations "" "$restore_plan"
+
   validate_toml "$CODEX_HOME/config.toml"
+
+  ok "복구 완료 (계획 기록: $restore_plan, pre-restore: $pre_restore_snapshot)"
 
   log "복구 후 상태"
   status_report

@@ -4,7 +4,7 @@
 
 - 제품명: OMX Guard
 - 유형: Bash 기반 로컬 CLI 유틸리티
-- 버전: 2.1.1
+- 버전: 2.2.0
 - 대상 운영체제: macOS, Linux
 - 주요 사용자: Codex CLI와 Oh My Codex(OMX)를 개인 또는 원격 개발 환경에서 사용하는 개발자
 
@@ -16,7 +16,7 @@
 
 - `mcp_servers.omx_*`
 - OMX marketplace/plugin 등록
-- 삭제된 `node_modules/oh-my-codex` 경로 참조
+- 입증된 OMX 전용 TOML table
 - `~/.omx` 상태
 - Codex plugin cache
 - 프로젝트 로컬 `.omx`
@@ -36,7 +36,7 @@
 - OMX 설치 전 사용자 설정을 파일 단위로 보존한다.
 - 네이티브 OMX 제거 전에 복구 지점을 만든다.
 - `omx uninstall`이 관리하는 설정 자산과 Guard가 정리하는 패키지 및 상태의 책임 경계를 명확히 한다.
-- OMX 관련 패키지, 실행 파일, MCP 설정, 상태와 캐시를 제거한다.
+- identity와 연결 대상이 입증된 OMX 패키지·실행 파일, 전용 TOML table, 상태와 캐시를 제거한다.
 - 설치 전에 없던 파일까지 포함해 정확한 파일 존재 상태를 복원한다.
 - macOS 및 Linux의 일반적인 Node 설치 환경을 지원한다.
 - 실제 사용자 홈을 손상시키지 않는 테스트 방법을 제공한다.
@@ -44,7 +44,7 @@
 ## 5. 비목표
 
 - Codex CLI 자체 제거
-- Codex 인증 정보, 세션, 로그, 명령 이력 백업
+- 스냅샷을 인증 정보가 제거된 공유용 설정 export로 제공
 - 임의의 사용자 TOML 설정을 OMX 소유로 추측해 삭제
 - 네이티브 `omx uninstall` 대체
 - 제3자 훅의 소유권을 추측하여 자동 삭제하거나 네이티브 uninstall의 fail-closed 검사를 우회
@@ -80,6 +80,11 @@
 4. 설치 전에 없던 OMX 파일과 디렉터리를 제거한다.
 5. 설치 전에 존재했던 설정 파일과 디렉터리를 복원한다.
 6. TOML 문법과 최종 상태를 확인한다.
+
+복구 전에 format 2 manifest와 payload checksum을 검증하고 immutable 복구
+계획과 `pre-restore` 스냅샷 ID를 기록한다. 모든 payload를 먼저 staging한 뒤
+목적지 drift를 재검사하고 교체한다. 실패 또는 중단 시 기존 목적지를
+rollback하고 복구 계획을 보존한다.
 
 OMX가 설치된 상태에서 만든 스냅샷으로 복구하려면 사용자가 manifest의 `omx.installed_version`을 확인하고 원래 패키지 관리자로 해당 버전을 먼저 재설치해야 한다. Guard는 npm 패키지 내용을 스냅샷하거나 자동 재설치하지 않는다. 문서는 다음 복구 순서를 명시해야 한다.
 
@@ -131,6 +136,9 @@ omx doctor
 - 플랫폼, 홈 경로, Codex 홈, OMX 설치 여부를 manifest에 저장
 - 활성 여부와 관계없이 발견한 OMX 패키지 및 실행 파일의 정확한 경로를 manifest에 저장
 - `--project`를 반복해서 받을 수 있음
+- canonical project 중복, symlink alias, 프로젝트 간 중첩, HOME/CODEX_HOME/state root 중첩을 거부
+- manifest와 각 payload의 SHA-256 및 크기를 기록하고 생성 직후 자체 검증
+- `.omx`와 project `.codex`/`.omx`에 인증·실행 데이터가 포함될 수 있음을 manifest에 명시
 - 백업 권한은 현재 사용자에게 제한
 
 ### FR-3 네이티브 제거 후 Guard 정리
@@ -169,6 +177,10 @@ omx doctor
 - 스냅샷과 현재 실행에서 공통으로 탐색한 루트 안의 신규 경로만 제거
 - 스냅샷 이후 처음 노출된 탐색 루트의 경로는 보존하고 경고
 - 정확한 설치 경로가 없는 이전 manifest에서는 npm 패키지 제거를 보수적으로 건너뜀
+- format 1 manifest는 무결성을 증명할 수 없는 제한 모드로 명시하고 자동 변환하지 않음
+- format 2 manifest와 payload checksum을 복구 시작 및 실행 직전에 검증
+- 전체 payload staging 후 목적지 drift를 재검증하고 목적지별 교체
+- 부분 실패·중단 시 기존 목적지를 rollback하고 단계별 복구 계획 및 pre-restore ID 보존
 - OMX 설치 스냅샷의 패키지 내용이나 버전은 자동 복원하지 않음
 - OMX 설치 스냅샷 복구 절차는 manifest 버전 재설치 → `restore` → `omx doctor` 순서를 안내
 
@@ -200,7 +212,10 @@ omx doctor
 - 제3자 훅은 문자열 일치만으로 자동 삭제하지 않음
 - 프로젝트 삭제는 명시적 선택
 - 다른 홈 환경으로 복구 차단
-- 사용자의 Codex 인증/세션 데이터는 다루지 않음
+- 스냅샷을 민감한 로컬 복구본으로 분류하고 인증·runtime 데이터 포함 가능성을 명시
+- 공유 전 수동 검토가 필요하며 기본 권한을 현재 사용자로 제한
+- 생성된 snapshot의 manifest와 payload 무결성을 자체 검증
+- 복구 중 새 경로의 일괄 삭제를 하지 않고 staging·교체·rollback 단계를 기록
 
 ### NFR-2 이식성
 
@@ -229,6 +244,7 @@ omx doctor
 ```text
 <state-root>/snapshots/<snapshot-id>/
 ├── manifest.json
+├── manifest.sha256
 └── payload/
     ├── entry-000
     ├── entry-001
@@ -239,13 +255,18 @@ manifest 주요 필드:
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "snapshot_id": "20260719-120000-pre-omx",
   "created_at": "ISO-8601",
   "label": "pre-omx",
   "home": "/Users/example",
   "codex_home": "/Users/example/.codex",
   "projects": [],
+  "sensitive_data": {
+    "classification": "private-local-recovery",
+    "contains_sensitive_data": true,
+    "sharing": "do-not-share-without-review"
+  },
   "omx": {
     "command_path": null,
     "installed": false,
@@ -266,11 +287,17 @@ manifest 주요 필드:
       "path": "/Users/example/.codex/config.toml",
       "existed": true,
       "archive_name": "entry-000",
-      "kind": "file"
+      "kind": "file",
+      "sha256": "<64 hex characters>",
+      "size_bytes": 123
     }
   ]
 }
 ```
+
+복구 계획은 `<state-root>/restore-plans/<operation-id>.json`에 기록한다. 계획은
+snapshot/manifest hash, 고정된 source·destination 목록, pre-restore snapshot
+ID, 각 staging/backup 경로와 단계 상태, 실패 및 rollback 결과를 포함한다.
 
 ## 10. 수용 기준
 
@@ -284,6 +311,9 @@ manifest 주요 필드:
 - 스냅샷 이후 처음 노출된 Node 관리자/npm 루트의 설치는 제거하지 않는다.
 - 프로젝트를 지정한 스냅샷은 프로젝트 `.codex`를 복원하고 `.omx` 존재 상태를 되돌린다.
 - `remove`는 명백한 `mcp_servers.omx_*`를 제거하지만 개인 MCP 설정은 보존한다.
+- 패키지 identity가 다르거나 불명확한 경로, 일반 파일 wrapper, 패키지 밖을 가리키는 symlink는 경고하고 보존한다.
+- 개인 주석·값·multiline 문자열에 OMX 경로 또는 이름이 있어도 bytes를 보존한다.
+- Python 3.10과 3.14 격리 fixture에서 package/symlink 소유권 및 TOML 경계 회귀가 통과한다.
 - `remove`는 legacy agent 옵션을 자동 삭제하지 않는다.
 - 문서는 `remove` 단독 실행을 완전 제거로 설명하지 않는다.
 - 문서는 `snapshot` → `omx uninstall --dry-run` → `omx uninstall` → `remove --no-snapshot` 순서를 제공한다.
@@ -292,6 +322,11 @@ manifest 주요 필드:
 - OMX 설치 스냅샷 복구 시 기록된 버전의 패키지를 먼저 재설치하도록 안내한다.
 - 문서는 다른 PC에서 제거할 경우 해당 PC에서 새 스냅샷을 생성하고, restore에는 동일한 `HOME` 및 `CODEX_HOME`이 필요하다고 안내한다.
 - 서로 다른 `HOME`으로 복구를 시도하면 중단된다.
+- canonical project 중복·symlink alias·중첩 또는 보호 경로 중첩 snapshot 생성을 거부한다.
+- format 2 snapshot의 manifest/payload checksum이 자체 검증된다.
+- manifest 또는 payload가 손상되면 목적지를 수정하기 전에 복구를 거부한다.
+- staging ENOSPC 또는 복구 중단 시 기존 목적지를 보존하고 복구 계획과 pre-restore ID를 남긴다.
+- format 1 snapshot은 명시적인 제한 모드로 유지하고 자동 변환하지 않는다.
 - 스냅샷 루트 밖 경로나 변조된 manifest의 허용되지 않은 복구 경로는 거부된다.
 - 스냅샷 루트 바깥 경로는 `delete-snapshot`으로 삭제할 수 없다.
 - 실제 사용자 홈이 아닌 임시 환경에서 통합 테스트가 수행된다.
@@ -320,7 +355,7 @@ shellcheck omx-guard.sh
 TMP_ROOT="$(mktemp -d)"
 ISOLATED_BIN="$TMP_ROOT/bin"
 mkdir -p "$ISOLATED_BIN"
-for command_name in bash python3 uname mktemp rm mkdir grep basename; do
+for command_name in bash python3 uname mktemp rm mkdir grep basename cat; do
   ln -s "$(command -v "$command_name")" "$ISOLATED_BIN/$command_name"
 done
 export HOME="$TMP_ROOT/home"
@@ -351,12 +386,18 @@ export PATH="$ISOLATED_BIN"
 10. Linux/macOS의 NVM, fnm, Volta 및 npm prefix 변형 제거 확인
 11. 스냅샷 당시 비활성 OMX 설치 및 무관한 동명 실행 파일 보존 확인
 12. 새로 노출된 탐색 루트와 로컬 소스 체크아웃 보존 확인
+13. exact package identity와 package 내부 symlink만 제거하고 일반·변경 wrapper와 불명확한 package를 보존하는지 확인
+14. quoted table, multiline 문자열, 개인 주석·값의 bytes를 보존하는지 Python 3.10/3.14에서 확인
+15. canonical 중복·symlink alias·프로젝트 중첩 및 HOME/CODEX_HOME/state root 중첩 거부
+16. 민감 정보 정책과 project `.codex/auth.json` payload 포함 경계 확인
+17. manifest·payload checksum 변조를 목적지 변경 전에 차단
+18. staging ENOSPC와 중단 fault에서 rollback 및 복구 계획 보존 확인
 
 문서 검증:
 
-13. `remove`를 네이티브 uninstall의 대체제로 표현하지 않는지 확인
-14. 권장 제거 순서와 `--no-snapshot`의 목적이 README와 PRD에서 일치하는지 확인
-15. 외부 훅 fail-closed 오류와 설치된 상태의 스냅샷 복구 제한이 문서화됐는지 확인
+19. `remove`를 네이티브 uninstall의 대체제로 표현하지 않는지 확인
+20. 권장 제거 순서와 `--no-snapshot`의 목적이 README와 PRD에서 일치하는지 확인
+21. 외부 훅 fail-closed 오류와 설치된 상태의 스냅샷 복구 제한이 문서화됐는지 확인
 
 ## 12. 향후 개선 후보
 

@@ -18,7 +18,7 @@ PRD.md
 - 현재 OMX 설치 및 Codex 설정 상태 확인
 - Codex 사용자 설정 스냅샷 생성
 - 네이티브 `omx uninstall` 전 복구 지점 생성
-- 네이티브 제거 후 OMX 전역 패키지, 실행 파일, 명백한 설정, 상태 및 캐시 정리
+- 네이티브 제거 후 소유권이 입증된 OMX 전역 패키지·실행 파일·설정과 상태 및 캐시 정리
 - 설치 전에 존재하던 파일과 존재하지 않던 상태까지 복원
 - 프로젝트별 `.omx` 및 `.codex` 선택 백업
 - 스냅샷 목록 조회 및 삭제
@@ -86,7 +86,10 @@ OMX는 평소 방식대로 설치하고 사용합니다.
 ./omx-guard.sh restore pre-omx
 ```
 
-복구 직전 현재 상태도 `pre-restore` 스냅샷으로 자동 저장됩니다.
+복구 직전 현재 상태도 `pre-restore` 스냅샷으로 자동 저장됩니다. 복구는
+manifest와 payload checksum을 다시 확인한 뒤 목적지와 같은 filesystem에
+staging하고 교체합니다. 실패하면 기존 목적지를 rollback하며, 단계별 복구
+계획과 `pre-restore` 스냅샷 ID를 state root의 `restore-plans`에 남깁니다.
 
 ### 4. 현재 OMX 제거
 
@@ -175,17 +178,25 @@ $CODEX_HOME/rules
 <project>/.codex
 ```
 
-Codex 인증, 세션, 로그 및 명령 이력은 백업 대상에 포함하지 않습니다.
+스냅샷은 공유용 설정 export가 아니라 **민감한 로컬 복구본**입니다.
+`~/.omx` 전체에는 OMX 인증·실행 상태가 포함될 수 있고, `--project`로 지정한
+프로젝트의 `.codex`/`.omx`에도 `auth.json`, 세션 또는 다른 runtime 데이터가
+있으면 그대로 포함됩니다. manifest는 이 경계를 `sensitive_data`로 명시합니다.
+스냅샷 디렉터리를 검토 없이 업로드하거나 공유하지 마세요.
+
+`--project`는 canonical 경로 기준으로 검사합니다. 같은 경로를 반복하거나
+symlink로 같은 경로를 다시 지정할 수 없으며, 프로젝트끼리 중첩되거나
+`HOME`, `CODEX_HOME`, OMX Guard state/snapshot root와 중첩되면 생성을
+중단합니다. 일반적인 `$HOME/work/project` 같은 프로젝트는 허용됩니다.
 
 ### `remove`
 
 `remove`는 네이티브 `omx uninstall` 이후의 후처리 명령입니다. 다음을 정리합니다.
 
-- `oh-my-codex` 전역 패키지
-- 알려진 NVM, fnm, Volta, Homebrew/Linuxbrew 및 npm 전역 경로의 OMX 실행 파일
+- `package.json`의 이름이 정확히 `oh-my-codex`인 전역 패키지
+- 위 패키지 내부를 실제로 가리키는 symlink인 OMX 실행 파일
 - `[mcp_servers.omx_*]` TOML 섹션
-- OMX marketplace 및 plugin 등록
-- 삭제된 `node_modules/oh-my-codex` 경로 참조
+- `[marketplaces.oh-my-codex-local]` 및 `[plugins."oh-my-codex@oh-my-codex-local"]` table
 - `~/.omx`
 - `~/.config/omx`
 - `~/.config/oh-my-codex`
@@ -210,6 +221,10 @@ max_depth = 2
 ```
 
 이러한 애매한 설정까지 정확하게 되돌리려면 OMX 설치 전에 `snapshot`을 만든 뒤 `restore`를 사용해야 합니다.
+
+같은 전역 prefix의 `bin/omx`라도 일반 파일이거나 패키지 밖을 가리키는 symlink이면 Guard는 소유권을 추정하지 않고 경고와 함께 보존합니다. 네이티브 uninstall 뒤에 변경된 wrapper가 남은 경우도 같습니다. 패키지 경로 역시 `package.json`의 정확한 이름을 확인할 수 없으면 보존합니다.
+
+`config.toml` 정리는 table 경계로 확인된 항목만 제거합니다. OMX 문자열이 포함된 개인 주석·일반 값·multiline 문자열은 byte 단위로 유지합니다. Python 3.11 이상의 `tomllib` 또는 별도 `tomli`가 있으면 수정 전후 TOML을 파싱하며, 둘 다 없는 Python 3.8~3.10에서는 보수적인 table 경계 수정만 수행하고 전체 문법 검사를 생략했다는 경고를 표시합니다.
 
 Node 설치 경로는 다음 변형을 함께 확인합니다.
 
@@ -259,7 +274,19 @@ omx doctor
 
 `<스냅샷에 기록된 버전>` 전체를 실제 `omx.installed_version` 값으로 바꿔서 실행합니다. 예를 들어 manifest 값이 `0.20.2`라면 `npm install -g oh-my-codex@0.20.2`를 사용합니다. 스냅샷은 생성 당시와 같은 `HOME` 및 `CODEX_HOME`에서 복구해야 하며, PC 간 설정 이전 용도로 사용하지 않습니다.
 
-정확한 설치 경로 기록이 없는 2.1.0 이하 스냅샷은 데이터 손실을 피하기 위해 npm 패키지 및 실행 파일 제거를 건너뜁니다. 가장 단순하고 정확한 용도는 OMX 설치 전에 만든 스냅샷으로 복구하는 것입니다.
+format 2 스냅샷은 `manifest.sha256`과 각 payload의 SHA-256/크기를 기록합니다.
+복구 시작과 실행 직전에 이를 확인하므로 manifest 또는 payload가 바뀌면
+목적지를 수정하기 전에 중단합니다. 복구할 payload는 모두 먼저 staging하고,
+목적지 drift를 재검사한 뒤 교체합니다. 교체 도중 실패하거나 중단되면 기존
+목적지를 rollback하고 복구 계획, pre-restore 스냅샷, 필요한 충돌 보존본을
+남깁니다.
+
+format 1 스냅샷은 checksum이 없으므로 경고와 함께 제한 모드로만 복구합니다.
+복구 작업 중 읽은 payload는 재검증하지만 생성 이후의 무결성은 증명할 수
+없습니다. 자동으로 format 2로 변환하지 않습니다. 정확한 설치 경로 기록이
+없는 2.1.0 이하 스냅샷은 데이터 손실을 피하기 위해 npm 패키지 및 실행 파일
+제거도 건너뜁니다. 가장 단순하고 정확한 용도는 OMX 설치 전에 만든 format 2
+스냅샷으로 복구하는 것입니다.
 
 ## 스냅샷 위치
 
@@ -267,6 +294,12 @@ omx doctor
 
 ```text
 ${XDG_STATE_HOME:-~/.local/state}/omx-guard/snapshots
+```
+
+복구 계획은 같은 state root 아래에 저장됩니다.
+
+```text
+${XDG_STATE_HOME:-~/.local/state}/omx-guard/restore-plans
 ```
 
 별도 위치를 사용하려면:
@@ -307,7 +340,8 @@ export PATH="$ISOLATED_BIN"
 
 일반적인 실제 제거에서는 `OMX_GUARD_NPM_PREFIXES`를 설정하지 않아야 `/usr/local`, `/opt/homebrew`, `/home/linuxbrew/.linuxbrew`, `/usr`도 확인합니다.
 
-스냅샷은 `umask 077`로 생성되어 현재 사용자 외의 접근을 제한합니다.
+스냅샷과 복구 계획은 `umask 077`로 생성되어 현재 사용자 외의 접근을
+제한합니다. 다만 로컬 비공개 권한은 공유 가능한 데이터라는 뜻이 아닙니다.
 
 ## 안전 설계
 
@@ -318,7 +352,12 @@ export PATH="$ISOLATED_BIN"
 - `restore` 전에 현재 상태 자동 스냅샷 생성
 - 프로젝트 상태 삭제는 명시적인 옵션과 프로젝트 경로가 필요
 - 개인 설정일 수 있는 legacy agent 옵션은 자동 삭제하지 않음
+- 패키지 identity가 불명확하거나 패키지 연결이 입증되지 않은 `omx` binary는 경고 후 보존
+- TOML은 확인된 OMX table만 제거하고 그 밖의 bytes는 그대로 보존
 - 서로 다른 `HOME` 또는 `CODEX_HOME`으로 스냅샷 복구 차단
+- canonical project 중복·symlink alias·중첩 및 보호 경로 중첩 차단
+- format 2 manifest/payload checksum과 복구 실행 직전 재검증
+- 목적지별 staging·drift 검사·rollback 및 단계별 복구 계획 보존
 - 스냅샷 루트 밖 경로 선택 차단 및 manifest 복구 경로/payload 사전 검증
 - 스냅샷 루트 바깥 경로를 `delete-snapshot`으로 삭제하지 못하도록 제한
 - 실제 사용자 홈을 사용하는 테스트는 금지하고 임시 `HOME`으로 테스트 권장
@@ -341,6 +380,7 @@ bash -n omx-guard.sh
 → restore 실행
 → 기존 개인 설정 복구
 → 설치 전에 없었던 OMX 파일 제거
+→ checksum 손상·ENOSPC·중단 fault에서 기존 목적지와 복구 계획 보존
 ```
 
 Bash 3.2 컨테이너에서는 프로젝트 인자 없는 `snapshot`, `restore`, `remove`와 macOS/Linux Node 관리자 경로를 함께 검증합니다. 실제 macOS 호스트 통합 테스트는 별도로 수행하는 것이 좋습니다.
@@ -351,4 +391,4 @@ Bash 3.2 컨테이너에서는 프로젝트 인자 없는 `snapshot`, `restore`,
 ./omx-guard.sh --version
 ```
 
-현재 스크립트 버전: `2.1.1`
+현재 스크립트 버전: `2.2.0`
