@@ -930,12 +930,9 @@ function moveEntriesToQuarantine(options, entries) {
     fs.renameSync(partialDir, batchDir);
   } catch (error) {
     const rollbackErrors = rollbackMoves(moved);
-    if (rollbackErrors.length === 0) {
-      fs.rmSync(partialDir, {recursive: true, force: true});
-    }
     const suffix = rollbackErrors.length > 0
-      ? `; rollback incomplete: ${rollbackErrors.join('; ')}; inspect ${partialDir}`
-      : '';
+      ? `; rollback incomplete: ${rollbackErrors.join('; ')}; incomplete batch preserved for inspection: ${partialDir}`
+      : `; incomplete batch preserved for inspection: ${partialDir}`;
     throw new Error(`${error.message}${suffix}`);
   }
 
@@ -1359,33 +1356,160 @@ function writeManifest(file, manifest) {
 }
 
 function moveExactFile(source, target) {
-  if (pathExistsNoFollow(target)) {
-    throw new Error(`target already exists: ${target}`);
-  }
-  try {
-    fs.renameSync(source, target);
-    return;
-  } catch (error) {
-    if (error.code !== 'EXDEV') {
-      throw error;
-    }
-  }
+  const sourceSnapshot = moveSourceSnapshot(source);
+  let targetIdentity = null;
 
   try {
-    fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-    const sourceStat = fs.statSync(source);
-    const targetStat = fs.statSync(target);
-    if (sourceStat.size !== targetStat.size) {
+    fs.linkSync(source, target);
+    const linkedTarget = moveSourceSnapshot(target);
+    if (!sameMoveIdentity(sourceSnapshot, linkedTarget)) {
+      throw new Error(`published target identity changed before source removal: ${target}`);
+    }
+    targetIdentity = linkedTarget;
+    const currentSource = moveSourceSnapshot(source);
+    if (!sameMoveIdentity(sourceSnapshot, currentSource)) {
+      throw new Error(`source identity changed before removal: ${source}`);
+    }
+    fs.unlinkSync(source);
+    return;
+  } catch (error) {
+    if (!targetIdentity && error.code === 'EXDEV') {
+      copyExactFileAcrossDevices(source, target, sourceSnapshot);
+      return;
+    }
+    if (!targetIdentity && error.code === 'EEXIST') {
+      throw new Error(`target already exists: ${target}`);
+    }
+    appendMoveCleanup(error, cleanupMoveArtifacts(source, sourceSnapshot, [
+      {file: target, identity: targetIdentity},
+    ]));
+    throw error;
+  }
+}
+
+function copyExactFileAcrossDevices(source, target, sourceSnapshot) {
+  const temporary = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.csm-copy-${process.pid}-${crypto.randomBytes(6).toString('hex')}`,
+  );
+  let temporaryIdentity = null;
+  let targetIdentity = null;
+
+  try {
+    fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
+    temporaryIdentity = moveSourceSnapshot(temporary);
+    const copiedSource = moveSourceSnapshot(source);
+    if (!sameMoveSnapshot(sourceSnapshot, copiedSource)) {
+      throw new Error(`source changed while copying across filesystems: ${source}`);
+    }
+    if (copiedSource.size !== temporaryIdentity.size) {
       throw new Error(`copied file size mismatch for ${source}`);
+    }
+    fsyncMoveFile(temporary);
+
+    try {
+      fs.linkSync(temporary, target);
+    } catch (error) {
+      if (error.code === 'EEXIST') {
+        throw new Error(`target already exists: ${target}`);
+      }
+      throw error;
+    }
+    const publishedTarget = moveSourceSnapshot(target);
+    if (!sameMoveIdentity(temporaryIdentity, publishedTarget)) {
+      throw new Error(`published target identity changed before source removal: ${target}`);
+    }
+    targetIdentity = publishedTarget;
+    fs.unlinkSync(temporary);
+    temporaryIdentity = null;
+
+    const currentSource = moveSourceSnapshot(source);
+    if (!sameMoveSnapshot(sourceSnapshot, currentSource)) {
+      throw new Error(`source changed before cross-filesystem removal: ${source}`);
     }
     fs.unlinkSync(source);
   } catch (error) {
-    try {
-      fs.unlinkSync(target);
-    } catch {
-      // Keep the original error; a later rollback report points to the partial batch.
-    }
+    appendMoveCleanup(error, cleanupMoveArtifacts(source, sourceSnapshot, [
+      {file: target, identity: targetIdentity},
+      {file: temporary, identity: temporaryIdentity},
+    ], true));
     throw error;
+  }
+}
+
+function moveSourceSnapshot(file) {
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`move path is not a regular file: ${file}`);
+  }
+  return {
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  };
+}
+
+function sameMoveIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
+function sameMoveSnapshot(left, right) {
+  return sameMoveIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs;
+}
+
+function fsyncMoveFile(file) {
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function cleanupMoveArtifacts(source, sourceSnapshot, artifacts, requireStableSnapshot = false) {
+  let sourcePreserved = false;
+  try {
+    const currentSource = moveSourceSnapshot(source);
+    sourcePreserved = requireStableSnapshot
+      ? sameMoveSnapshot(sourceSnapshot, currentSource)
+      : sameMoveIdentity(sourceSnapshot, currentSource);
+  } catch {
+    sourcePreserved = false;
+  }
+
+  const notes = [];
+  for (const artifact of artifacts) {
+    if (!artifact.identity) {
+      continue;
+    }
+    if (!sourcePreserved) {
+      notes.push(`recovery copy preserved at ${artifact.file}`);
+      continue;
+    }
+    try {
+      const current = moveSourceSnapshot(artifact.file);
+      if (!sameMoveIdentity(artifact.identity, current)) {
+        notes.push(`changed path preserved without cleanup: ${artifact.file}`);
+        continue;
+      }
+      fs.unlinkSync(artifact.file);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        notes.push(`could not clean CSM-created path ${artifact.file}: ${sanitizeTerminalText(error.message)}`);
+      }
+    }
+  }
+  return notes;
+}
+
+function appendMoveCleanup(error, notes) {
+  if (notes.length > 0) {
+    error.message = `${error.message}; ${notes.join('; ')}`;
   }
 }
 

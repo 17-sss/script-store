@@ -179,6 +179,111 @@ fs.mkdirSync = function mkdirSyncWithRestoreMutation(directory, options) {
 };
 RESTORE_MUTATOR
 
+cat > "$TMP_DIR/move-fault-injector.js" <<'MOVE_FAULT_INJECTOR'
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const originalLinkSync = fs.linkSync.bind(fs);
+const originalCopyFileSync = fs.copyFileSync.bind(fs);
+const originalUnlinkSync = fs.unlinkSync.bind(fs);
+const originalWriteFileSync = fs.writeFileSync.bind(fs);
+const mode = process.env.CSM_TEST_MOVE_MODE || '';
+const primarySource = process.env.CSM_TEST_MOVE_SOURCE || '';
+const failSource = process.env.CSM_TEST_MOVE_FAIL_SOURCE || '';
+const rollbackTarget = process.env.CSM_TEST_MOVE_ROLLBACK_TARGET || '';
+const marker = process.env.CSM_TEST_MOVE_MARKER || '';
+const foreignContent = process.env.CSM_TEST_MOVE_FOREIGN_CONTENT || 'foreign target\n';
+let publishedTarget = '';
+
+function samePath(left, right) {
+  return Boolean(left && right && path.resolve(left) === path.resolve(right));
+}
+
+function makeError(code, message) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  return error;
+}
+
+function recordPath(file, kind) {
+  if (!marker) {
+    return;
+  }
+  const stat = fs.lstatSync(file);
+  originalWriteFileSync(marker, `${JSON.stringify({
+    file: path.resolve(file),
+    kind,
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+  })}\n`, 'utf8');
+}
+
+function createForeign(file) {
+  originalWriteFileSync(file, foreignContent, {encoding: 'utf8', flag: 'wx'});
+  recordPath(file, 'foreign');
+}
+
+fs.linkSync = function linkSyncWithMoveFault(source, target) {
+  if (mode === 'same-target-race' && samePath(source, primarySource)) {
+    createForeign(target);
+    return originalLinkSync(source, target);
+  }
+
+  if (
+    (mode === 'exdev-success' || mode === 'exdev-target-race' || mode === 'exdev-copy-failure') &&
+    samePath(source, primarySource)
+  ) {
+    throw makeError('EXDEV', 'forced cross-filesystem move');
+  }
+
+  if (
+    mode === 'exdev-target-race' &&
+    samePath(target, path.join(path.dirname(target), path.basename(primarySource))) &&
+    path.basename(source).startsWith(`.${path.basename(primarySource)}.csm-copy-`)
+  ) {
+    createForeign(target);
+    return originalLinkSync(source, target);
+  }
+
+  if (mode === 'cleanup-target-race' && samePath(source, primarySource)) {
+    const result = originalLinkSync(source, target);
+    publishedTarget = target;
+    return result;
+  }
+
+  if (mode === 'rollback-target-race' && samePath(source, failSource)) {
+    throw makeError('EIO', 'forced move failure before rollback');
+  }
+
+  if (mode === 'rollback-target-race' && samePath(target, rollbackTarget)) {
+    createForeign(target);
+    return originalLinkSync(source, target);
+  }
+
+  return originalLinkSync(source, target);
+};
+
+fs.copyFileSync = function copyFileSyncWithMoveFault(source, target, flags) {
+  const result = originalCopyFileSync(source, target, flags);
+  if (mode === 'exdev-copy-failure' && samePath(source, primarySource)) {
+    recordPath(target, 'partial-copy');
+    throw makeError('EIO', 'forced failure after copy');
+  }
+  return result;
+};
+
+fs.unlinkSync = function unlinkSyncWithMoveFault(file) {
+  if (mode === 'cleanup-target-race' && samePath(file, primarySource) && publishedTarget) {
+    originalUnlinkSync(publishedTarget);
+    createForeign(publishedTarget);
+    throw makeError('EIO', 'forced source removal failure');
+  }
+  return originalUnlinkSync(file);
+};
+MOVE_FAULT_INJECTOR
+
 cat > "$TMP_DIR/proc-fd-deny.js" <<'PROC_FD_DENY'
 'use strict';
 
@@ -283,6 +388,13 @@ uuid_bc="019f1000-0000-7000-8000-000000000055"
 uuid_bd="019f1000-0000-7000-8000-000000000056"
 uuid_be="019f1000-0000-7000-8000-000000000057"
 uuid_bf="019f1000-0000-7000-8000-000000000058"
+uuid_bg="019f1000-0000-7000-8000-000000000059"
+uuid_bh="019f1000-0000-7000-8000-000000000060"
+uuid_bi="019f1000-0000-7000-8000-000000000061"
+uuid_bj="019f1000-0000-7000-8000-000000000062"
+uuid_bk="019f1000-0000-7000-8000-000000000063"
+uuid_bl="019f1000-0000-7000-8000-000000000064"
+uuid_bm="019f1000-0000-7000-8000-000000000065"
 
 write_session() {
   local area="$1"
@@ -424,20 +536,33 @@ run_tui() {
   local old_id="${4:-}"
   local new_id="${5:-}"
   local manager_args="${6:-}"
+  local wait_for_output="${7:-}"
   if ! command -v script >/dev/null 2>&1; then
     printf 'script command is required for TUI mutation tests\n' >&2
     exit 1
   fi
   set +o pipefail
   {
-    python3 - "$keys" <<'PY'
+    python3 - "$keys" "$log" "$wait_for_output" <<'PY'
 import os
 import sys
 import time
 
 data = sys.argv[1].encode('utf-8').decode('unicode_escape')
+log_path = sys.argv[2]
+wait_for_output = sys.argv[3].encode('utf-8')
 try:
     for char in data:
+        if char == 'q' and wait_for_output:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    with open(log_path, 'rb') as output:
+                        if wait_for_output in output.read():
+                            break
+                except FileNotFoundError:
+                    pass
+                time.sleep(0.05)
         os.write(1, char.encode('utf-8'))
         time.sleep(0.6 if char == 'x' else 0.08)
 except BrokenPipeError:
@@ -684,6 +809,45 @@ assert_not_quarantined() {
   fi
 }
 
+assert_file_unchanged() {
+  local file="$1"
+  local expected_identity="$2"
+  local expected_digest="$3"
+  [[ -f "$file" ]] || fail "expected original file to remain: $file"
+  [[ "$(stat -c '%d:%i' -- "$file")" == "$expected_identity" ]] || \
+    fail "original file identity changed: $file"
+  [[ "$(sha256sum "$file" | cut -d ' ' -f 1)" == "$expected_digest" ]] || \
+    fail "original file contents changed: $file"
+}
+
+assert_recorded_path_preserved() {
+  local marker="$1"
+  local expected_kind="$2"
+  local expected_content="${3:-}"
+  local expected_digest="${4:-}"
+  MARKER_PATH="$marker" EXPECTED_KIND="$expected_kind" EXPECTED_CONTENT="$expected_content" EXPECTED_DIGEST="$expected_digest" node <<'NODE'
+const crypto = require('crypto');
+const fs = require('fs');
+const record = JSON.parse(fs.readFileSync(process.env.MARKER_PATH, 'utf8'));
+const stat = fs.lstatSync(record.file);
+if (record.kind !== process.env.EXPECTED_KIND) {
+  throw new Error(`unexpected recorded path kind: ${record.kind}`);
+}
+if (String(stat.dev) !== record.dev || String(stat.ino) !== record.ino) {
+  throw new Error(`recorded path identity changed or was replaced: ${record.file}`);
+}
+if (process.env.EXPECTED_CONTENT && fs.readFileSync(record.file, 'utf8') !== process.env.EXPECTED_CONTENT) {
+  throw new Error(`recorded path contents changed: ${record.file}`);
+}
+if (process.env.EXPECTED_DIGEST) {
+  const digest = crypto.createHash('sha256').update(fs.readFileSync(record.file)).digest('hex');
+  if (digest !== process.env.EXPECTED_DIGEST) {
+    throw new Error(`recorded path digest changed: ${record.file}`);
+  }
+}
+NODE
+}
+
 start_identity_mutation_during_confirmation() {
   local file="$1"
   local old_id="$2"
@@ -787,6 +951,13 @@ restore_toctou_file="$(write_session sessions "$uuid_az" "$uuid_az" "2026-07-20T
 restore_archived_file="$(write_session archived_sessions "$uuid_ba" "$uuid_ba" "2026-07-20T00:04:08" "case S restore archived success")"
 restore_move_recheck_second_file="$(write_session sessions "$uuid_bb" "$uuid_bb" "2026-07-20T00:04:09" "case T restore immediate recheck second")"
 restore_move_recheck_first_file="$(write_session sessions "$uuid_bc" "$uuid_bc" "2026-07-20T00:04:10" "case T restore immediate recheck first")"
+move_same_collision_file="$(write_session sessions "$uuid_bg" "$uuid_bg" "2026-07-20T00:05:01" "case Move same target race")"
+move_exdev_success_file="$(write_session sessions "$uuid_bh" "$uuid_bh" "2026-07-20T00:05:02" "case Move EXDEV success")"
+move_exdev_collision_file="$(write_session sessions "$uuid_bi" "$uuid_bi" "2026-07-20T00:05:03" "case Move EXDEV target race")"
+move_copy_failure_file="$(write_session sessions "$uuid_bj" "$uuid_bj" "2026-07-20T00:05:04" "case Move copy failure")"
+move_cleanup_race_file="$(write_session sessions "$uuid_bk" "$uuid_bk" "2026-07-20T00:05:05" "case Move cleanup target race")"
+move_rollback_fail_file="$(write_session sessions "$uuid_bl" "$uuid_bl" "2026-07-20T00:05:06" "case Move rollback failure")"
+move_rollback_moved_file="$(write_session sessions "$uuid_bm" "$uuid_bm" "2026-07-20T00:05:07" "case Move rollback moved")"
 
 # Writer recovery always uses a same-user fixture process. It never opens the
 # user's CODEX_HOME or a real Codex process.
@@ -802,7 +973,8 @@ writer_success_signal_log="$WRITER_SIGNAL_LOG"
 (
   export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
   export CSM_TEST_DENY_PROC_FD_STAT="/proc/$LIVE_PROCESS_PID/fd"
-  run_tui "/case Writer recovery success\nxTERMINATE WRITER $uuid_aj $writer_success_pid\nq" "$TMP_DIR/writer-success.log"
+  run_tui "/case Writer recovery success\nxTERMINATE WRITER $uuid_aj $writer_success_pid\nq" \
+    "$TMP_DIR/writer-success.log" "" "" "" "" 'Writer recovery succeeded'
 )
 for writer_wait_attempt in {1..100}; do
   if ! kill -0 "$writer_success_pid" 2>/dev/null; then
@@ -1010,6 +1182,107 @@ assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_p"
 assert_contains "$(clean_log "$TMP_DIR/multi-delete.log")" "$uuid_o"
 assert_quarantined_file "$multi_two_file" "$uuid_p"
 assert_quarantined_file "$multi_one_file" "$uuid_o"
+
+# File moves use no-clobber publication. Deterministic fault injection covers
+# same-filesystem target races, EXDEV copy/publish failures, cleanup races, and
+# rollback collisions without touching real Codex data.
+same_move_identity="$(stat -c '%d:%i' -- "$move_same_collision_file")"
+same_move_digest="$(sha256sum "$move_same_collision_file" | cut -d ' ' -f 1)"
+same_move_marker="$TMP_DIR/move-same-target.marker"
+same_move_foreign=$'same-filesystem foreign target\n'
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/move-fault-injector.js"
+  export CSM_TEST_MOVE_MODE='same-target-race'
+  export CSM_TEST_MOVE_SOURCE="$move_same_collision_file"
+  export CSM_TEST_MOVE_MARKER="$same_move_marker"
+  export CSM_TEST_MOVE_FOREIGN_CONTENT="$same_move_foreign"
+  run_tui "/case Move same target race\ndQUARANTINE $uuid_bg\nq" "$TMP_DIR/move-same-target.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/move-same-target.log")" 'target already exists'
+assert_file_unchanged "$move_same_collision_file" "$same_move_identity" "$same_move_digest"
+assert_recorded_path_preserved "$same_move_marker" 'foreign' "$same_move_foreign"
+
+exdev_success_digest="$(sha256sum "$move_exdev_success_file" | cut -d ' ' -f 1)"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/move-fault-injector.js"
+  export CSM_TEST_MOVE_MODE='exdev-success'
+  export CSM_TEST_MOVE_SOURCE="$move_exdev_success_file"
+  run_tui "/case Move EXDEV success\ndQUARANTINE $uuid_bh\nq" "$TMP_DIR/move-exdev-success.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/move-exdev-success.log")" "Quarantined 1 session"
+assert_quarantined_file "$move_exdev_success_file" "$uuid_bh"
+exdev_success_quarantined="$(quarantined_path "$move_exdev_success_file")"
+[[ "$(sha256sum "$exdev_success_quarantined" | cut -d ' ' -f 1)" == "$exdev_success_digest" ]] || \
+  fail 'EXDEV move changed transcript contents'
+
+exdev_collision_identity="$(stat -c '%d:%i' -- "$move_exdev_collision_file")"
+exdev_collision_digest="$(sha256sum "$move_exdev_collision_file" | cut -d ' ' -f 1)"
+exdev_collision_marker="$TMP_DIR/move-exdev-target.marker"
+exdev_collision_foreign=$'EXDEV foreign target\n'
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/move-fault-injector.js"
+  export CSM_TEST_MOVE_MODE='exdev-target-race'
+  export CSM_TEST_MOVE_SOURCE="$move_exdev_collision_file"
+  export CSM_TEST_MOVE_MARKER="$exdev_collision_marker"
+  export CSM_TEST_MOVE_FOREIGN_CONTENT="$exdev_collision_foreign"
+  run_tui "/case Move EXDEV target race\ndQUARANTINE $uuid_bi\nq" "$TMP_DIR/move-exdev-target.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/move-exdev-target.log")" 'target already exists'
+assert_file_unchanged "$move_exdev_collision_file" "$exdev_collision_identity" "$exdev_collision_digest"
+assert_recorded_path_preserved "$exdev_collision_marker" 'foreign' "$exdev_collision_foreign"
+
+copy_failure_identity="$(stat -c '%d:%i' -- "$move_copy_failure_file")"
+copy_failure_digest="$(sha256sum "$move_copy_failure_file" | cut -d ' ' -f 1)"
+copy_failure_marker="$TMP_DIR/move-copy-failure.marker"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/move-fault-injector.js"
+  export CSM_TEST_MOVE_MODE='exdev-copy-failure'
+  export CSM_TEST_MOVE_SOURCE="$move_copy_failure_file"
+  export CSM_TEST_MOVE_MARKER="$copy_failure_marker"
+  run_tui "/case Move copy failure\ndQUARANTINE $uuid_bj\nq" "$TMP_DIR/move-copy-failure.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/move-copy-failure.log")" 'forced failure after copy'
+assert_file_unchanged "$move_copy_failure_file" "$copy_failure_identity" "$copy_failure_digest"
+assert_recorded_path_preserved "$copy_failure_marker" 'partial-copy' '' "$copy_failure_digest"
+
+cleanup_race_identity="$(stat -c '%d:%i' -- "$move_cleanup_race_file")"
+cleanup_race_digest="$(sha256sum "$move_cleanup_race_file" | cut -d ' ' -f 1)"
+cleanup_race_marker="$TMP_DIR/move-cleanup-race.marker"
+cleanup_race_foreign=$'cleanup foreign target\n'
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/move-fault-injector.js"
+  export CSM_TEST_MOVE_MODE='cleanup-target-race'
+  export CSM_TEST_MOVE_SOURCE="$move_cleanup_race_file"
+  export CSM_TEST_MOVE_MARKER="$cleanup_race_marker"
+  export CSM_TEST_MOVE_FOREIGN_CONTENT="$cleanup_race_foreign"
+  run_tui "/case Move cleanup target race\ndQUARANTINE $uuid_bk\nq" "$TMP_DIR/move-cleanup-target.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/move-cleanup-target.log")" 'forced source removal failure'
+assert_file_unchanged "$move_cleanup_race_file" "$cleanup_race_identity" "$cleanup_race_digest"
+assert_recorded_path_preserved "$cleanup_race_marker" 'foreign' "$cleanup_race_foreign"
+
+rollback_fail_identity="$(stat -c '%d:%i' -- "$move_rollback_fail_file")"
+rollback_fail_digest="$(sha256sum "$move_rollback_fail_file" | cut -d ' ' -f 1)"
+rollback_moved_digest="$(sha256sum "$move_rollback_moved_file" | cut -d ' ' -f 1)"
+rollback_marker="$TMP_DIR/move-rollback-target.marker"
+rollback_foreign=$'rollback foreign target\n'
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/move-fault-injector.js"
+  export CSM_TEST_MOVE_MODE='rollback-target-race'
+  export CSM_TEST_MOVE_FAIL_SOURCE="$move_rollback_fail_file"
+  export CSM_TEST_MOVE_ROLLBACK_TARGET="$move_rollback_moved_file"
+  export CSM_TEST_MOVE_MARKER="$rollback_marker"
+  export CSM_TEST_MOVE_FOREIGN_CONTENT="$rollback_foreign"
+  run_tui "/case Move rollback\nAdQUARANTINE $uuid_bm $uuid_bl\nq" "$TMP_DIR/move-rollback-target.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/move-rollback-target.log")" 'rollback incomplete'
+assert_file_unchanged "$move_rollback_fail_file" "$rollback_fail_identity" "$rollback_fail_digest"
+assert_recorded_path_preserved "$rollback_marker" 'foreign' "$rollback_foreign"
+rollback_recovery="$(find "$QUARANTINE_ROOT" -type f -name "$(basename -- "$move_rollback_moved_file")" -print)"
+[[ -n "$rollback_recovery" && "$(wc -l <<< "$rollback_recovery")" -eq 1 ]] || \
+  fail 'rollback collision did not preserve exactly one recovery copy'
+[[ "$(sha256sum "$rollback_recovery" | cut -d ' ' -f 1)" == "$rollback_moved_digest" ]] || \
+  fail 'rollback recovery copy changed transcript contents'
 
 # Quarantine browsing and restore use only isolated fixture JSONLs. Restore
 # requires every full UUID and never invokes the Codex CLI.

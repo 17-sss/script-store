@@ -131,7 +131,7 @@ TERMINATE WRITER 019efcef-19e5-7a83-821a-1b3ec9e1716d 12345
 
 ## 격리와 영구 삭제
 
-기본 실행에서 `d`는 삭제가 아니라 격리입니다. 선택한 JSONL 파일만 아래 기본 위치의 새 batch 디렉터리로 옮기며, batch마다 원래 경로와 보관된 상대 경로를 기록한 `manifest.json`을 생성합니다.
+기본 실행에서 `d`는 삭제가 아니라 격리입니다. 선택한 JSONL 파일만 아래 기본 위치의 새 batch 디렉터리로 옮기며, batch마다 원래 경로와 보관된 상대 경로를 기록한 `manifest.json`을 생성합니다. 파일 이동은 같은 filesystem에서는 hard link를 원자적으로 게시한 뒤 원본 이름을 제거하고, filesystem이 다르면 배타적으로 만든 임시 복사본을 검증한 뒤 같은 방식으로 게시합니다. 어느 경로에서도 이미 생긴 대상 파일을 덮어쓰지 않습니다.
 
 ```txt
 $XDG_DATA_HOME/csm/quarantine
@@ -161,7 +161,7 @@ RESTORE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 복원은 manifest에 기록된 active 또는 archived 원래 경로로 해당 JSONL만 이동합니다. transcript 내용은 수정하지 않으며, 기존 파일이나 심볼릭 링크가 원래 경로에 있으면 덮어쓰지 않고 선택 전체를 차단합니다. 같은 quarantine batch의 여러 항목과 서로 다른 batch에 흩어진 active/archived 항목을 함께 복원할 수 있습니다.
 
-확인 전과 확인 직후에 선택 전체의 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 실제 각 JSONL을 이동하기 직전에도 해당 transcript identity와 잠근 manifest snapshot이 그대로인지 다시 확인합니다. 하나라도 unsafe이거나 경로·identity가 바뀌면 이후 이동을 중단하고 이미 이동한 선택 항목도 격리로 되돌리려고 시도합니다. 최종 재검증부터 파일 이동과 manifest 갱신이 끝날 때까지 관련 batch의 `.restore.lock`을 경로 순서대로 모두 배타적으로 유지하므로, 같은 batch의 동시 복원이 서로의 manifest 갱신을 덮어쓰지 않고 여러 CSM 복원 간 교착도 피합니다. manifest 갱신 실패도 같은 전체 rollback 대상으로 처리하며, 성공하면 각 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
+확인 전과 확인 직후에 선택 전체의 manifest 항목, 보관 경로, 원래 경로, rollout filename UUID, 첫 번째 `session_meta.payload.id`를 다시 검증합니다. 실제 각 JSONL을 이동하기 직전에도 해당 transcript identity와 잠근 manifest snapshot이 그대로인지 다시 확인합니다. 하나라도 unsafe이거나 경로·identity가 바뀌면 이후 이동을 중단하고 이미 이동한 선택 항목도 격리로 되돌리려고 시도합니다. rollback 대상 경로에 다른 파일이 생기면 그 파일을 덮어쓰거나 지우지 않고, 원래 transcript 사본이 남은 incomplete batch의 정확한 경로를 오류에 표시합니다. 최종 재검증부터 파일 이동과 manifest 갱신이 끝날 때까지 관련 batch의 `.restore.lock`을 경로 순서대로 모두 배타적으로 유지하므로, 같은 batch의 동시 복원이 서로의 manifest 갱신을 덮어쓰지 않고 여러 CSM 복원 간 교착도 피합니다. manifest 갱신 실패도 같은 전체 rollback 대상으로 처리하며, 성공하면 각 manifest에서 해당 항목을 완료 기록으로 옮겨 나머지 격리 항목만 목록에 유지합니다. 격리 화면의 `d`는 지원하지 않으므로 격리 파일을 실수로 영구 삭제하지 않습니다.
 
 격리 없이 영구 삭제하려면 처음부터 `--force`로 TUI를 실행합니다.
 
@@ -179,7 +179,7 @@ FORCE DELETE 019efcef-19e5-7a83-821a-1b3ec9e1716d
 
 확인에는 개수나 짧은 prefix가 아니라 화면에 표시된 대상 UUID 전체를 입력합니다. `Required input:` 뒤의 값을 그대로 입력해야 합니다.
 
-확인 입력 후 대상 파일을 다시 읽어 UUID 안전성을 재검증합니다. 그 사이 ID가 바뀌거나 unsafe 상태가 되면 아무 파일도 변경하지 않고 전체 작업을 차단합니다. 격리는 batch 작업 도중 실패하면 이미 옮긴 파일을 원래 위치로 되돌리려고 시도합니다. 영구 삭제는 재검증을 통과한 선택 대상의 정확한 JSONL 경로만 `unlink`하며, 공식 `codex delete`를 호출하지 않습니다.
+확인 입력 후 대상 파일을 다시 읽어 UUID 안전성을 재검증합니다. 그 사이 ID가 바뀌거나 unsafe 상태가 되면 아무 파일도 변경하지 않고 전체 작업을 차단합니다. 격리는 batch 작업 도중 실패하면 이미 옮긴 파일을 원래 위치로 되돌리려고 시도합니다. 실패한 `.partial-*` batch는 재귀 삭제하지 않고 수동 확인용으로 보존하며, CSM이 생성했다고 identity로 확인한 이동 산출물만 원본이 온전히 남아 있을 때 정리합니다. 영구 삭제는 재검증을 통과한 선택 대상의 정확한 JSONL 경로만 `unlink`하며, 공식 `codex delete`를 호출하지 않습니다.
 
 archive와 unarchive도 실행 전에 대상 UUID 목록을 터미널에 표시합니다.
 
@@ -235,6 +235,6 @@ codex unarchive <SESSION_UUID>
 ./smoke-test.sh
 ```
 
-테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다.
+테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다. 이동 검증은 same-filesystem, 강제 EXDEV, 복사 실패, 원본 제거 실패, rollback 대상 충돌을 주입해 외부 파일의 bytes와 inode 및 transcript 복구본 보존을 확인합니다.
 
 설치 테스트 역시 임시 HOME만 사용하며 실제 `~/.local/bin`, `.bashrc`, `.zshrc`를 변경하지 않습니다.
