@@ -102,6 +102,8 @@ source ~/.zshrc
 cxt
 cxt --xhigh
 cxt --madmax
+cxt --safe
+cxt --astra
 cxt resume --last
 cxt --at <Tab>
 ```
@@ -109,6 +111,8 @@ cxt --at <Tab>
 - 모든 실행에 `--no-alt-screen`을 기본 적용합니다.
 - `--xhigh`를 Codex의 최고 추론 강도 설정으로 변환합니다.
 - `--madmax`를 `--yolo`로 변환합니다. 승인과 sandbox를 우회하므로 신뢰할 수 있는 작업에서만 사용하세요.
+- `--safe`를 read-only sandbox와 on-request 승인으로 변환합니다.
+- 모델 별칭은 검증한 list-visible catalog만 제공하고 retired 별칭은 명시적 오류로 안내합니다.
 - tmux 안에서 실행하면 중첩 attach 대신 새 세션으로 현재 client를 전환합니다.
 - `--at`/`--attach`와 `--ks`/`--kill-session` 뒤에서 유효한 `codex-*` tmux 세션만 탭 완성합니다.
 
@@ -123,7 +127,10 @@ Codex CLI가 필수이며 tmux는 선택 사항입니다. 설치 옵션과 정�
 
 ### OMX Guard
 
-Oh My Codex(OMX) 설치 전후의 Codex 설정을 스냅샷으로 남기고, 네이티브 제거 후 남은 패키지·실행 파일·상태·캐시를 정리하거나 이전 상태로 복구하는 Linux/macOS 도구입니다.
+Oh My Codex(OMX) 설치 전후의 Codex 설정을 checksum이 있는 민감한 로컬
+스냅샷으로 남기고, 네이티브 제거 후 남은 패키지·실행 파일·상태·캐시를
+정리하거나 staging/rollback 가능한 계획으로 이전 상태를 복구하는
+Linux/macOS 도구입니다.
 
 OMX Guard는 `omx uninstall`을 대체하지 않습니다. 완전 제거 시에는 OMX가 관리하는 hooks, prompts, skills, agents 등을 먼저 네이티브 명령으로 정리한 뒤 Guard를 후처리에 사용합니다.
 
@@ -170,7 +177,10 @@ devtunnel 3123 prox-dev-hoyoung
 devtunnel 3000,5173,6006 prox-dev-hoyoung
 ```
 
-내부적으로 각 포트에 대해 `ssh -N -L <port>:127.0.0.1:<port> <alias>` 형태의 로컬 포워딩을 구성합니다. SSH config는 생성하거나 수정하지 않습니다.
+내부적으로 각 포트에 대해 `ssh -o ExitOnForwardFailure=yes -N -L
+127.0.0.1:<port>:127.0.0.1:<port> <alias>` 형태의 로컬 포워딩을 구성합니다.
+SSH config는 생성하거나 수정하지 않습니다. profile은 exact managed block과
+원자 교체 계약으로 관리합니다.
 
 | 파일 | 역할 |
 | --- | --- |
@@ -186,23 +196,37 @@ WSL에서 실행 중인 개발 서버를 Windows 또는 같은 네트워크의 �
 관리자 PowerShell에서 실행하세요.
 
 ```powershell
-# Windows 0.0.0.0:5173 → WSL_IP:5173 연결
+# 안전한 기본값: Windows 127.0.0.1:5173 → WSL_IP:5173 연결
 .\windows\wsl-portproxy\setup.ps1 -Port 5173
 
-# portproxy와 관련 방화벽 규칙 제거
+# 이 도구의 ownership state와 정확히 일치하는 규칙만 제거
 .\windows\wsl-portproxy\uninstall.ps1 -Port 5173
+
+# LAN 공개가 필요할 때만 0.0.0.0 + Private/LocalSubnet 범위를 명시
+.\windows\wsl-portproxy\setup.ps1 -Port 5173 -Exposure Lan
 ```
 
 | 파일 | 역할 |
 | --- | --- |
-| `setup.ps1` | 현재 WSL IP를 찾아 지정 포트의 portproxy와 inbound 방화벽 규칙을 생성 |
-| `uninstall.ps1` | 지정 포트의 portproxy 및 현재·레거시 방화벽 규칙을 제거 |
+| `setup.ps1` | 단일 WSL NAT IPv4를 검증해 loopback 또는 명시적 LAN proxy를 생성하고 ownership을 기록 |
+| `uninstall.ps1` | ownership과 현재 proxy/firewall가 정확히 일치할 때만 제거하고 부분 실패를 rollback |
+| `smoke-test.ps1` | WSL·netsh·NetSecurity mock으로 충돌·노출 범위·실패 rollback을 검증 |
 
 Windows, WSL, 관리자 권한이 필요합니다. `devtunnel`과 같은 포트를 함께 사용하면 바인딩 충돌이 날 수 있으므로 [wsl-portproxy README](windows/wsl-portproxy/README.md)의 확인 및 문제 해결 절차를 참고하세요.
 
 ## 테스트
 
-Linux 도구는 각 폴더의 스모크 테스트를 직접 실행할 수 있습니다.
+공통 진입점은 계약 검사, 플랫폼별 실행/미실행 구분, 격리 smoke 결과를 한
+표로 출력합니다. `--quick`은 긴 csm PID namespace suite를 명시적으로 SKIP하고,
+`--full`은 포함합니다.
+
+```bash
+./tests/audit-smoke.sh --quick
+./tests/audit-smoke.sh --full
+python3 ./tests/check-contracts.py
+```
+
+Linux 도구는 각 폴더의 스모크 테스트를 직접 실행할 수도 있습니다.
 
 ```bash
 ./linux/agent-heartbeat/smoke-test.sh
@@ -211,13 +235,20 @@ Linux 도구는 각 폴더의 스모크 테스트를 직접 실행할 수 있습
 ./linux/omx-guard/smoke-test.sh
 ```
 
-Windows의 `devtunnel` 테스트는 PowerShell에서 실행합니다.
+Windows mock 테스트는 실제 profile·WSL·portproxy·firewall을 변경하지 않습니다.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\devtunnel\smoke-test.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\devtunnel\smoke-test.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\wsl-portproxy\smoke-test.ps1
+pwsh -NoProfile -File .\windows\devtunnel\smoke-test.ps1
+pwsh -NoProfile -File .\windows\wsl-portproxy\smoke-test.ps1
 ```
 
-각 스모크 테스트는 가능한 한 임시 디렉터리와 mock 명령을 사용해 실제 사용자 설정을 변경하지 않도록 구성되어 있습니다. `wsl-portproxy`는 Windows 네트워크 설정을 직접 변경하는 도구이므로 별도 자동 테스트가 없으며, 실행 전 현재 규칙을 확인하는 것이 좋습니다.
+각 스모크 테스트는 임시 디렉터리와 mock 명령을 사용해 실제 사용자 설정을
+변경하지 않도록 구성되어 있습니다. CI는 Linux 전체 suite, macOS의 cxt/OMX
+suite, Windows PowerShell 5.1과 PowerShell 7의 두 mock suite를 별도 job/step으로
+실행합니다. SKIP은 성공 증거로 취급하지 않으며 실제 Windows bind·Ctrl+C·GPO,
+실제 macOS 통합은 별도 검증입니다.
 
 ```powershell
 netsh interface portproxy show all

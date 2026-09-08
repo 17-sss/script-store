@@ -1,0 +1,59 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Full isolated Linux verification
+        run: bash tests/audit-smoke.sh --full
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Contract checks
+        run: python3 tests/check-contracts.py
+      - name: Bash syntax
+        run: >-
+          bash -n linux/cxt/bin/cxt linux/cxt/install-cxt.sh
+          linux/cxt/tests/test-cxt.sh linux/omx-guard/omx-guard.sh
+          linux/omx-guard/smoke-test.sh
+      - name: cxt isolated smoke
+        run: bash linux/cxt/tests/test-cxt.sh
+      - name: OMX Guard isolated smoke
+        run: bash linux/omx-guard/smoke-test.sh
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows PowerShell 5.1 parser and mock smoke
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\windows\devtunnel\smoke-test.ps1
+          & .\windows\wsl-portproxy\smoke-test.ps1
+      - name: PowerShell 7 parser and mock smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\windows\devtunnel\smoke-test.ps1
+          & .\windows\wsl-portproxy\smoke-test.ps1
