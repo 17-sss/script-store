@@ -12,11 +12,26 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 declare -A CFG=()
 declare -a TARGETS=()
 declare -a TARGET_FILTERS=()
+declare -a TEMP_DIRS=()
 
 CONFIG_PATH="${AGENT_HEARTBEAT_CONFIG:-}"
 DRY_RUN=0
 MESSAGE_OVERRIDE=""
 FORCE=0
+LAST_TEMP_DIR=""
+CRONTAB_READ_PRESENT=0
+RUN_LOCK_FD=""
+
+cleanup_temp_dirs() {
+  local dir
+  for dir in "${TEMP_DIRS[@]}"; do
+    if [[ -n "$dir" && "$dir" != "/" && -d "$dir" ]]; then
+      rm -rf -- "$dir"
+    fi
+  done
+}
+
+trap cleanup_temp_dirs EXIT
 
 default_config_path() {
   if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
@@ -31,6 +46,16 @@ default_log_path() {
     printf '%s/%s/%s.log' "$XDG_STATE_HOME" "$APP_NAME" "$APP_NAME"
   else
     printf '%s/.local/state/%s/%s.log' "$HOME" "$APP_NAME" "$APP_NAME"
+  fi
+}
+
+default_lock_path() {
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    printf '%s/%s/run.lock' "$XDG_RUNTIME_DIR" "$APP_NAME"
+  elif [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    printf '%s/%s/run.lock' "$XDG_STATE_HOME" "$APP_NAME"
+  else
+    printf '%s/.local/state/%s/run.lock' "$HOME" "$APP_NAME"
   fi
 }
 
@@ -219,10 +244,48 @@ configured_log_path() {
   normalize_path "$(cfg_get "schedule" "log_path" "$(default_log_path)")"
 }
 
+configured_timeout_seconds() {
+  local section="$1"
+  local value
+  value="$(cfg_get "$section" "timeout_seconds" "$(cfg_get "runtime" "timeout_seconds" "30")")"
+
+  if [[ ! "$value" =~ ^[1-9][0-9]{0,4}$ ]] || (( value > 86400 )); then
+    die "timeout_seconds must be an integer from 1 to 86400 in [$section]: $value"
+  fi
+
+  printf '%s' "$value"
+}
+
+validate_cron_schedule() {
+  local cron="$1"
+  local -a fields=()
+  local field
+
+  [[ "$cron" != *$'\n'* && "$cron" != *$'\r'* ]] || die "cron schedule must be one line"
+  [[ "$cron" != *%* ]] || die "cron schedule must not contain %"
+
+  read -r -a fields <<< "$cron"
+  [[ "${#fields[@]}" -eq 5 ]] || die "cron schedule must contain exactly five fields: $cron"
+
+  for field in "${fields[@]}"; do
+    [[ "$field" =~ ^[[:alnum:]*/,-]+$ ]] || die "unsupported character in cron field: $field"
+  done
+}
+
+reject_cron_percent() {
+  local label="$1"
+  local value="$2"
+  [[ "$value" != *%* ]] || die "$label must not contain % because cron treats it as a newline"
+}
+
 cron_line() {
   local cron log_path
   cron="$(configured_cron)"
   log_path="$(configured_log_path)"
+  validate_cron_schedule "$cron"
+  reject_cron_percent "script path" "$SCRIPT_PATH"
+  reject_cron_percent "config path" "$CONFIG_PATH"
+  reject_cron_percent "log path" "$log_path"
   printf '%s /bin/bash %s run --config %s >> %s 2>&1' \
     "$cron" \
     "$(shell_quote "$SCRIPT_PATH")" \
@@ -260,6 +323,74 @@ strip_managed_cron_block() {
   ' "$input_file"
 }
 
+validate_managed_cron_block() {
+  local input_file="$1"
+  awk -v start="$MARKER_START" -v end="$MARKER_END" '
+    $0 == start {
+      if (in_block || start_count > 0) invalid = 1
+      in_block = 1
+      start_count++
+      next
+    }
+    $0 == end {
+      if (!in_block || end_count > 0) invalid = 1
+      in_block = 0
+      end_count++
+      next
+    }
+    END {
+      if (in_block || start_count != end_count || start_count > 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$input_file"
+}
+
+make_temp_dir() {
+  LAST_TEMP_DIR="$(mktemp -d)"
+  TEMP_DIRS+=("$LAST_TEMP_DIR")
+}
+
+read_crontab_snapshot() {
+  local output_file="$1"
+  local error_file="$2"
+  local status detail
+
+  if crontab -l > "$output_file" 2> "$error_file"; then
+    CRONTAB_READ_PRESENT=1
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "$status" -eq 1 && ! -s "$output_file" ]] && \
+      grep -Eiq 'no crontab( for)?|does not exist' "$error_file"; then
+    : > "$output_file"
+    CRONTAB_READ_PRESENT=0
+    return 0
+  fi
+
+  detail="$(head -n 1 "$error_file")"
+  [[ -n "$detail" ]] || detail="exit status $status"
+  printf '%s: unable to read crontab: %s\n' "$APP_NAME" "$detail" >&2
+  return 1
+}
+
+verify_crontab_unchanged() {
+  local original_file="$1"
+  local original_present="$2"
+  local verify_file="$3"
+  local verify_error="$4"
+  local verify_present
+
+  read_crontab_snapshot "$verify_file" "$verify_error" || return 1
+  verify_present="$CRONTAB_READ_PRESENT"
+
+  if [[ "$original_present" -ne "$verify_present" ]] || ! cmp -s -- "$original_file" "$verify_file"; then
+    printf '%s: crontab changed while preparing the update; refusing to overwrite it\n' "$APP_NAME" >&2
+    return 1
+  fi
+}
+
 install_cron() {
   resolve_config_path
 
@@ -270,18 +401,22 @@ install_cron() {
 
   load_config "$CONFIG_PATH"
 
-  local log_path tmpdir current filtered next
+  local log_path tmpdir current current_error filtered next verify verify_error original_present
   log_path="$(configured_log_path)"
-  mkdir -p -- "$(dirname -- "$log_path")"
+  cron_line > /dev/null
 
-  tmpdir="$(mktemp -d)"
+  make_temp_dir
+  tmpdir="$LAST_TEMP_DIR"
   current="$tmpdir/current"
+  current_error="$tmpdir/current.error"
   filtered="$tmpdir/filtered"
   next="$tmpdir/next"
+  verify="$tmpdir/verify"
+  verify_error="$tmpdir/verify.error"
 
-  if ! crontab -l > "$current" 2>/dev/null; then
-    : > "$current"
-  fi
+  read_crontab_snapshot "$current" "$current_error" || die "cron installation aborted"
+  original_present="$CRONTAB_READ_PRESENT"
+  validate_managed_cron_block "$current" || die "malformed managed cron block; refusing to modify crontab"
 
   strip_managed_cron_block "$current" > "$filtered"
   {
@@ -294,26 +429,39 @@ install_cron() {
     printf '\n%s\n' "$MARKER_END"
   } > "$next"
 
-  crontab "$next"
-  rm -rf -- "$tmpdir"
+  verify_crontab_unchanged "$current" "$original_present" "$verify" "$verify_error" || \
+    die "cron installation aborted"
+  mkdir -p -- "$(dirname -- "$log_path")"
+  crontab "$next" || die "failed to write updated crontab"
   log_info "installed cron schedule: $(configured_cron)"
 }
 
 remove_cron() {
-  local tmpdir current next
-  tmpdir="$(mktemp -d)"
+  local tmpdir current current_error next verify verify_error original_present
+  make_temp_dir
+  tmpdir="$LAST_TEMP_DIR"
   current="$tmpdir/current"
+  current_error="$tmpdir/current.error"
   next="$tmpdir/next"
+  verify="$tmpdir/verify"
+  verify_error="$tmpdir/verify.error"
 
-  if ! crontab -l > "$current" 2>/dev/null; then
-    rm -rf -- "$tmpdir"
+  read_crontab_snapshot "$current" "$current_error" || die "cron removal aborted"
+  original_present="$CRONTAB_READ_PRESENT"
+  if [[ "$original_present" -eq 0 ]]; then
     log_info "no crontab found"
     return 0
   fi
 
+  validate_managed_cron_block "$current" || die "malformed managed cron block; refusing to modify crontab"
+  if ! grep -Fx -- "$MARKER_START" "$current" > /dev/null; then
+    log_info "no managed cron block found"
+    return 0
+  fi
   strip_managed_cron_block "$current" > "$next"
-  crontab "$next"
-  rm -rf -- "$tmpdir"
+  verify_crontab_unchanged "$current" "$original_present" "$verify" "$verify_error" || \
+    die "cron removal aborted"
+  crontab "$next" || die "failed to write updated crontab"
   log_info "removed managed cron block"
 }
 
@@ -351,11 +499,30 @@ render_message() {
   fi
 }
 
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  command -v timeout >/dev/null 2>&1 || {
+    printf '%s: timeout command is required for tmux and command targets\n' "$APP_NAME" >&2
+    return 1
+  }
+
+  timeout --foreground --kill-after=2s "${timeout_seconds}s" "$@"
+}
+
+target_error() {
+  local target="$1"
+  shift
+  printf '%s: target [%s] failed: %s\n' "$APP_NAME" "$target" "$*" >&2
+  return 1
+}
+
 send_tmux_target() {
   local target="$1"
   local section="target.$target"
   local message="$2"
-  local pane socket submit
+  local pane socket submit timeout_seconds pane_id
 
   pane="$(cfg_get "$section" "pane" "")"
   socket="$(cfg_get "$section" "socket" "")"
@@ -364,7 +531,8 @@ send_tmux_target() {
     submit=1
   fi
 
-  [[ -n "$pane" ]] || die "missing pane for tmux target [$section]"
+  [[ -n "$pane" ]] || target_error "$target" "missing pane" || return 1
+  timeout_seconds="$(configured_timeout_seconds "$section")" || return 1
 
   local tmux_cmd=(tmux)
   if [[ -n "$socket" ]]; then
@@ -376,9 +544,20 @@ send_tmux_target() {
     return 0
   fi
 
-  "${tmux_cmd[@]}" send-keys -t "$pane" -l "$message"
+  if ! pane_id="$(run_with_timeout "$timeout_seconds" "${tmux_cmd[@]}" display-message -p -t "$pane" '#{pane_id}')"; then
+    target_error "$target" "could not resolve tmux pane within ${timeout_seconds}s"
+    return 1
+  fi
+  [[ -n "$pane_id" ]] || target_error "$target" "tmux returned an empty pane identity" || return 1
+
+  local send_cmd=("${tmux_cmd[@]}" send-keys -t "$pane_id" -l "$message")
   if [[ "$submit" -eq 1 ]]; then
-    "${tmux_cmd[@]}" send-keys -t "$pane" Enter
+    send_cmd+=(';' send-keys -t "$pane_id" Enter)
+  fi
+
+  if ! run_with_timeout "$timeout_seconds" "${send_cmd[@]}"; then
+    target_error "$target" "tmux send failed or timed out after ${timeout_seconds}s"
+    return 1
   fi
 }
 
@@ -386,17 +565,22 @@ send_command_target() {
   local target="$1"
   local section="target.$target"
   local message="$2"
-  local command
+  local command timeout_seconds
 
   command="$(cfg_get "$section" "command" "")"
-  [[ -n "$command" ]] || die "missing command for command target [$section]"
+  [[ -n "$command" ]] || target_error "$target" "missing command" || return 1
+  timeout_seconds="$(configured_timeout_seconds "$section")" || return 1
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf 'dry-run: command target=%s command=%s message=%s\n' "$target" "$command" "$message"
     return 0
   fi
 
-  AGENT_TARGET="$target" AGENT_MESSAGE="$message" bash -lc "$command"
+  if ! run_with_timeout "$timeout_seconds" env \
+      AGENT_TARGET="$target" AGENT_MESSAGE="$message" bash -lc "$command"; then
+    target_error "$target" "command failed or timed out after ${timeout_seconds}s"
+    return 1
+  fi
 }
 
 send_file_target() {
@@ -406,7 +590,7 @@ send_file_target() {
   local path
 
   path="$(cfg_get "$section" "path" "")"
-  [[ -n "$path" ]] || die "missing path for file target [$section]"
+  [[ -n "$path" ]] || target_error "$target" "missing path" || return 1
   path="$(normalize_path "$path")"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -414,8 +598,14 @@ send_file_target() {
     return 0
   fi
 
-  mkdir -p -- "$(dirname -- "$path")"
-  printf '%s\n' "$message" >> "$path"
+  if ! mkdir -p -- "$(dirname -- "$path")"; then
+    target_error "$target" "could not create file target directory"
+    return 1
+  fi
+  if ! printf '%s\n' "$message" >> "$path"; then
+    target_error "$target" "could not append to file target"
+    return 1
+  fi
 }
 
 send_target() {
@@ -425,24 +615,41 @@ send_target() {
 
   type="$(cfg_get "$section" "type" "tmux")"
   type="$(printf '%s' "$type" | tr '[:upper:]' '[:lower:]')"
-  message="$(render_message "$target")"
+  message="$(render_message "$target")" || return 1
 
   case "$type" in
     tmux)
-      send_tmux_target "$target" "$message"
+      send_tmux_target "$target" "$message" || return 1
       ;;
     command)
-      send_command_target "$target" "$message"
+      send_command_target "$target" "$message" || return 1
       ;;
     file)
-      send_file_target "$target" "$message"
+      send_file_target "$target" "$message" || return 1
       ;;
     *)
-      die "unknown target type for [$section]: $type"
+      target_error "$target" "unknown target type: $type"
+      return 1
       ;;
   esac
 
   log_info "sent heartbeat to target: $target"
+}
+
+acquire_run_lock() {
+  local lock_path
+
+  [[ "$DRY_RUN" -eq 0 ]] || return 0
+  command -v flock >/dev/null 2>&1 || die "flock command is required to prevent duplicate runs"
+
+  lock_path="$(normalize_path "$(cfg_get "runtime" "lock_path" "$(default_lock_path)")")"
+  mkdir -p -- "$(dirname -- "$lock_path")"
+  if ! exec {RUN_LOCK_FD}> "$lock_path"; then
+    die "unable to open run lock: $lock_path"
+  fi
+  if ! flock -n "$RUN_LOCK_FD"; then
+    die "another agent-heartbeat run is already active"
+  fi
 }
 
 run_targets() {
@@ -450,8 +657,10 @@ run_targets() {
   load_config "$CONFIG_PATH"
 
   [[ "${#TARGETS[@]}" -gt 0 ]] || die "no [target.NAME] sections found in $CONFIG_PATH"
+  acquire_run_lock
 
-  local target sent_count=0 skipped_count=0
+  local target sent_count=0 skipped_count=0 failed_count=0
+  local -a failed_targets=()
   for target in "${TARGETS[@]}"; do
     target_selected "$target" || continue
 
@@ -460,11 +669,17 @@ run_targets() {
       continue
     fi
 
-    send_target "$target"
-    sent_count=$((sent_count + 1))
+    if send_target "$target"; then
+      sent_count=$((sent_count + 1))
+    else
+      failed_count=$((failed_count + 1))
+      failed_targets+=("$target")
+    fi
   done
 
-  if [[ "$sent_count" -eq 0 ]]; then
+  if [[ "$failed_count" -gt 0 ]]; then
+    die "heartbeat failed for $failed_count target(s): ${failed_targets[*]}"
+  elif [[ "$sent_count" -eq 0 ]]; then
     die "no enabled targets matched (skipped: $skipped_count)"
   fi
 }

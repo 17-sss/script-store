@@ -10,6 +10,12 @@
 cron=0 8,13,18,23 * * *
 log_path=~/.local/state/agent-heartbeat/agent-heartbeat.log
 
+[runtime]
+# tmux/command targets are stopped after this many seconds.
+timeout_seconds=30
+# Only one non-dry-run process may hold this lock at a time.
+lock_path=~/.local/state/agent-heartbeat/run.lock
+
 [message]
 text=5-hour agent heartbeat ping. Please acknowledge and continue the active session if needed.
 prefix_timestamp=true

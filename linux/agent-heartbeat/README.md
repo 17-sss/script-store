@@ -200,6 +200,19 @@ type=command
 command=printf '%s\n' "$AGENT_MESSAGE" >> ~/agent-pings.log
 ```
 
+`tmux`와 `command`에는 전역 또는 target별 제한 시간을 지정할 수 있습니다. 기본값은 30초입니다.
+
+```ini
+[runtime]
+timeout_seconds=30
+lock_path=~/.local/state/agent-heartbeat/run.lock
+
+[target.claude-cli]
+timeout_seconds=60
+```
+
+실제 `run`은 잠금 파일을 사용해 중복 실행을 거부합니다. 한 target이 실패해도 나머지 enabled target은 계속 시도하며, 마지막에 실패한 target 목록과 함께 non-zero로 종료합니다. `--dry-run`은 잠금을 잡지 않습니다.
+
 `file`은 메시지를 파일에 append합니다. 설치 직후 안전한 기본값과 스모크 테스트에 사용합니다.
 
 ```ini
@@ -211,7 +224,13 @@ path=~/.local/state/agent-heartbeat/messages.log
 
 ## 스모크 테스트
 
-실제 crontab이나 tmux pane을 건드리지 않고 파서, 전송, cron 출력만 검증합니다.
+실제 crontab이나 tmux pane을 건드리지 않고 임시 HOME과 mock 명령으로 다음을 검증합니다.
+
+- file/command/tmux 전송과 특수문자 보존
+- command/tmux 제한 시간, target 실패 집계, 중복 실행 거부
+- 기존 사용자 cron 보존과 관리 블록 설치/제거
+- crontab 읽기 오류, 손상된 marker, 설치 직전 동시 변경 시 쓰기 중단
+- 5필드 cron 형식과 cron에서 특별한 의미를 갖는 `%` 거부
 
 ```bash
 ./smoke-test.sh
@@ -224,3 +243,7 @@ path=~/.local/state/agent-heartbeat/messages.log
 ```bash
 ./agent-heartbeat.sh remove
 ```
+
+설치와 제거는 `crontab -l`의 “등록된 crontab 없음”과 실제 읽기 오류를 구분합니다. 관리 marker가 중복되거나 닫히지 않았거나, 읽은 뒤 쓰기 전에 crontab이 바뀌면 기존 내용을 덮어쓰지 않고 중단합니다. 비교와 쓰기 사이의 매우 짧은 경쟁 구간은 `crontab` 명령 자체에 compare-and-swap 기능이 없어 완전히 제거할 수 없습니다.
+
+스케줄은 공백으로 구분된 5필드 형식만 지원합니다. cron은 명령의 `%`를 줄바꿈으로 해석하므로 스케줄, 스크립트 경로, 설정 경로, 로그 경로에 `%`가 있으면 설치와 미리보기를 거부합니다.
