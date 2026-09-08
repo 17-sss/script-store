@@ -59,6 +59,7 @@ function main() {
 function parseArgs(args) {
   const options = {
     codexHome: process.env.CODEX_HOME || path.join(os.homedir(), '.codex'),
+    sqliteHome: process.env.CODEX_SQLITE_HOME || '',
     cwd: process.cwd(),
     showAll: false,
     listMode: '',
@@ -100,6 +101,7 @@ function parseArgs(args) {
   }
 
   options.codexHome = normalizePath(options.codexHome);
+  options.sqliteHome = normalizePath(options.sqliteHome || options.codexHome);
   options.cwd = normalizePath(options.cwd);
   options.quarantineDir = normalizePath(options.quarantineDir);
   if (options.forceDelete && options.listMode === 'quarantine') {
@@ -164,6 +166,10 @@ function printInventory(options) {
     result[mode] = applyFilters(inventory[mode], options);
   }
 
+  for (const warning of inventory.warnings) {
+    console.error(`${APP_NAME}: warning: ${warning}`);
+  }
+
   if (options.json) {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -194,6 +200,7 @@ function nextView(current, options) {
 }
 
 async function startTui(options) {
+  const inventory = loadInventory(options);
   const state = {
     options,
     view: 'active',
@@ -201,10 +208,10 @@ async function startTui(options) {
     scroll: 0,
     query: '',
     searching: false,
-    status: '',
+    status: inventory.warnings[0] || '',
     suspended: false,
     selected: new Set(),
-    inventory: loadInventory(options),
+    inventory,
   };
 
   process.stdin.setRawMode(true);
@@ -379,7 +386,12 @@ async function resumeSelected(state) {
   if (!entry) {
     return;
   }
-  await runCodex(state, ['resume', entry.id], `Returned from ${entry.id}`);
+  const entries = await checkedMutationTargets(state, [entry], 'resume');
+  if (!entries || entries.length === 0) {
+    return;
+  }
+  const fresh = entries[0];
+  await runCodex(state, ['resume', fresh.canonicalId], `Returned from ${fresh.canonicalId}`);
 }
 
 async function archiveSelected(state) {
@@ -656,6 +668,7 @@ function writerRecoveryConfirmationPrompt(entry, writer, diagnosis, expected) {
     `${strong('Transcript:')} ${entry.canonicalId}`,
     `${strong('PID:')} ${writer.pid}`,
     `${strong('Process name:')} ${sanitizeTerminalText(writer.name) || '(unknown)'}`,
+    `${strong('Executable:')} ${sanitizeTerminalText(writer.executable) || '(unavailable)'}`,
     `${strong('Command:')} ${sanitizeTerminalText(writer.command) || '(unavailable)'}`,
     `${strong('Other Codex transcripts held:')} ${writer.otherTranscriptCount}`,
     ...incompleteLines,
@@ -718,6 +731,7 @@ function formatWriterHolder(holder) {
   return [
     `- ${kind}: PID ${holder.pid}`,
     `  name: ${sanitizeTerminalText(holder.name) || '(unknown)'}`,
+    `  executable: ${sanitizeTerminalText(holder.executable) || '(unavailable)'}`,
     `  command: ${sanitizeTerminalText(holder.command) || '(unavailable)'}`,
     `  other Codex transcripts held: ${holder.otherTranscriptCount}`,
   ];
@@ -1708,7 +1722,11 @@ function inspectProcessForTarget(pid, target, options) {
     }
     return unavailableProcessInspection(processText.reason);
   }
-  const codexRelated = reliablyIdentifiesCodexProcess(processText.name, processText.argv);
+  const codexRelated = reliablyIdentifiesCodexProcess(
+    processText.name,
+    processText.argv,
+    processText.executable,
+  );
 
   const descriptorScan = inspectProcessDescriptors(pid, target, options);
   if (!descriptorScan.ok) {
@@ -1736,7 +1754,11 @@ function inspectProcessForTarget(pid, target, options) {
       }
       return unavailableProcessInspection(currentProcessText.reason);
     }
-    const currentCodexRelated = reliablyIdentifiesCodexProcess(currentProcessText.name, currentProcessText.argv);
+    const currentCodexRelated = reliablyIdentifiesCodexProcess(
+      currentProcessText.name,
+      currentProcessText.argv,
+      currentProcessText.executable,
+    );
     if (codexRelated || currentCodexRelated) {
       return unavailableProcessInspection(
         `could not inspect file descriptors for Codex candidate PID ${pid}: ${descriptorScan.reason}`
@@ -1756,6 +1778,7 @@ function inspectProcessForTarget(pid, target, options) {
     startTime: identity.value,
     name: processText.name,
     command: processText.command,
+    executable: processText.executable,
     codexRelated,
     holdsTarget: descriptorScan.holdsTarget,
     otherTranscriptCount: descriptorScan.otherTranscriptCount,
@@ -1888,7 +1911,8 @@ function readProcessText(pid) {
     const argv = fs.readFileSync(path.join('/proc', String(pid), 'cmdline'), 'utf8')
       .split('\0')
       .filter(Boolean);
-    return {ok: true, name, argv, command: argv.join(' ')};
+    const executable = fs.readlinkSync(path.join('/proc', String(pid), 'exe')).replace(/ \(deleted\)$/, '');
+    return {ok: true, name, argv, command: argv.join(' '), executable};
   } catch (error) {
     return processGone(error)
       ? {ok: false, gone: true}
@@ -1896,12 +1920,15 @@ function readProcessText(pid) {
   }
 }
 
-function reliablyIdentifiesCodexProcess(name, argv) {
-  const candidates = [name, argv[0]].filter(Boolean);
-  return candidates.some((candidate) => {
+function reliablyIdentifiesCodexProcess(name, argv, executable) {
+  const isCodexName = (candidate) => {
     const base = path.basename(String(candidate)).toLowerCase();
     return base === 'codex' || /^codex[-_.][a-z0-9_.-]+$/.test(base);
-  });
+  };
+  if (!executable || !isCodexName(executable)) {
+    return false;
+  }
+  return [name, argv[0]].filter(Boolean).some(isCodexName);
 }
 
 function processGone(error) {
@@ -1923,7 +1950,7 @@ async function runCodex(state, args, successMessage) {
   suspendTui(state);
   console.log('');
   console.log(`$ codex ${args.join(' ')}`);
-  const result = spawnSync('codex', args, {stdio: 'inherit'});
+  const result = spawnSync('codex', args, codexSpawnOptions(state));
   resumeTui(state);
   state.status = result.status === 0 ? successMessage : `codex ${args[0]} failed with exit code ${result.status}`;
 }
@@ -1950,7 +1977,7 @@ async function runCodexBatch(state, entries, argsForEntry, verb) {
 
     const args = argsForEntry(fresh);
     console.log(`$ codex ${args.join(' ')}`);
-    const result = spawnSync('codex', args, {stdio: 'inherit'});
+    const result = spawnSync('codex', args, codexSpawnOptions(state));
     if (result.status === 0) {
       succeeded += 1;
     } else {
@@ -1977,6 +2004,14 @@ async function runCodexBatch(state, entries, argsForEntry, verb) {
       : `${verb} ${succeeded} session${succeeded === 1 ? '' : 's'}, ${failed} failed`;
   }
   return {blocked: Boolean(blocked), succeeded, failed};
+}
+
+function codexSpawnOptions(state) {
+  const env = {...process.env, CODEX_HOME: state.options.codexHome};
+  if (process.env.CODEX_SQLITE_HOME) {
+    env.CODEX_SQLITE_HOME = state.options.sqliteHome;
+  }
+  return {stdio: 'inherit', env};
 }
 
 async function promptLine(state, prompt) {
@@ -2010,6 +2045,11 @@ function resumeTui(state) {
 
 function refresh(state) {
   state.inventory = loadInventory(state.options);
+  if (state.inventory.warnings.length > 0) {
+    state.status = state.status
+      ? `${state.status}; ${state.inventory.warnings[0]}`
+      : state.inventory.warnings[0];
+  }
   pruneSelection(state);
   state.cursor = clamp(state.cursor, 0, Math.max(currentEntries(state).length - 1, 0));
   ensureCursorVisible(state);
@@ -2253,11 +2293,13 @@ function applyFilters(entries, options, query = '') {
 }
 
 function loadInventory(options) {
-  const titles = loadThreadTitles(options.codexHome);
+  const titleMetadata = loadThreadTitles(options.sqliteHome);
+  const titles = titleMetadata.titles;
   return {
     active: loadEntries(sessionsDir(options), 'active', titles),
     archived: loadEntries(archivedDir(options), 'archived', titles),
     quarantine: options.forceDelete ? [] : loadQuarantineEntries(options, titles),
+    warnings: titleMetadata.warning ? [titleMetadata.warning] : [],
   };
 }
 
@@ -2627,10 +2669,10 @@ function buildEntry({file, state, identity, timestamp, cwd, source, summary, rol
   };
 }
 
-function loadThreadTitles(codexHome) {
-  const databasePath = path.join(codexHome, 'state_5.sqlite');
+function loadThreadTitles(sqliteHome) {
+  const databasePath = path.join(sqliteHome, 'state_5.sqlite');
   if (!fs.existsSync(databasePath)) {
-    return new Map();
+    return {titles: new Map(), warning: ''};
   }
 
   try {
@@ -2656,18 +2698,21 @@ function loadThreadTitles(codexHome) {
         FROM threads
         WHERE trim(title) <> ''
       `).all();
-      return new Map(rows
+      return {titles: new Map(rows
         .filter((row) => (
           normalizeUuid(row.id) &&
           typeof row.title === 'string' &&
           normalizeStoredText(row.title) !== normalizeStoredText(row.first_user_message)
         ))
-        .map((row) => [normalizeUuid(row.id), row.title]));
+        .map((row) => [normalizeUuid(row.id), row.title])), warning: ''};
     } finally {
       database.close();
     }
-  } catch {
-    return new Map();
+  } catch (error) {
+    return {
+      titles: new Map(),
+      warning: `thread title metadata could not be read from ${databasePath}: ${sanitizeTerminalText(error.message)}`,
+    };
   }
 }
 

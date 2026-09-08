@@ -74,7 +74,7 @@ active/archived 화면에서 선택된 행이 하나라도 있으면 `b`, `u`, `
 
 ## 세션 ID 안전 정책
 
-보관, 보관취소, 삭제 같은 변경 작업은 세션 ID를 안전하게 확인한 항목에만 실행됩니다.
+재개, 보관, 보관취소, 삭제 같은 변경 작업은 세션 ID를 안전하게 확인한 항목에만 실행됩니다.
 
 - 파일명이 정확히 `rollout-...-<UUID>.jsonl` 형식일 때만 끝의 UUID를 canonical ID 후보로 사용합니다.
 - transcript 안에서는 첫 번째 최상위 `session_meta.payload.id`만 확인합니다.
@@ -83,6 +83,7 @@ active/archived 화면에서 선택된 행이 하나라도 있으면 `b`, `u`, `
 - 뒤쪽에 부모 세션이나 이전 세션의 `session_meta`가 다시 등장해도 canonical ID를 덮어쓰지 않습니다.
 - UUID가 없거나, 형식이 틀리거나, 두 UUID가 불일치하거나, transcript를 안전하게 판별할 수 없으면 `unsafe`로 표시하고 변경 작업을 차단합니다.
 - 다중 선택에 unsafe 항목이 하나라도 포함되면 안전한 항목만 골라 실행하지 않고 전체 작업을 차단합니다.
+- `r`도 `codex resume` 직전에 active 경로와 canonical identity를 다시 읽으며, unsafe이거나 그 사이 바뀐 항목은 실행하지 않습니다.
 - 다중 작업은 전체 대상을 먼저 검증하고, 각 CLI 호출 직전에도 해당 transcript를 다시 읽습니다. 앞선 명령 실행 중 남은 세션 ID가 바뀌면 이후 명령을 중단하고 선택 상태를 유지합니다.
 
 unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력에서 차단 사유를 확인할 수 있습니다.
@@ -116,7 +117,7 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키지는 사용하지 않습니다.
 
 - 실행 직전에 기존 변경 작업과 같은 안전 gate를 적용합니다. filename UUID와 첫 번째 `session_meta.payload.id`가 일치하고, 정확한 active sessions root 아래 JSONL이어야 합니다.
-- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. FD보다 먼저 process start identity와 name/command를 읽고 Codex 후보인지 분류합니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다.
+- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. FD보다 먼저 process start identity, name/command, `/proc/<pid>/exe`의 실제 실행 파일을 읽고 Codex 후보인지 분류합니다. argv[0]만 `codex`로 바꾼 Node 같은 프로세스는 Codex 후보로 인정하지 않습니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다.
 - Codex 후보의 FD를 완전히 읽을 수 없으면 진단 불가로 표시하고 어떤 프로세스도 종료하지 않습니다. name/command가 안정적으로 비-Codex로 확인된 프로세스의 FD만 권한 때문에 읽을 수 없으면 PID, name/command, 실패 원인을 경고로 표시하되 검증된 Codex writer 탐색은 계속합니다. 따라서 전체 로컬 holder 부재를 증명하지는 않으며, 읽을 수 있는 비-Codex 프로세스가 실제 target `dev`/`ino`를 잡고 있으면 기존처럼 종료를 차단합니다.
 - PID, process name/command, 그 프로세스가 함께 열고 있는 다른 Codex transcript 수를 terminal-control sanitization 후 보여 줍니다.
 - 완전히 검사한 결과 local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. 일부 non-Codex 프로세스의 FD를 검사하지 못했다면 `No verified local writer holds this transcript`와 경고를 함께 표시합니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
@@ -205,6 +206,8 @@ TUI를 열지 않고 목록만 보고 싶을 때 쓸 수 있습니다.
 CODEX_HOME=/tmp/example-codex ./bin/csm --list all --all
 ```
 
+`--codex-home PATH`를 사용하면 목록뿐 아니라 CSM이 실행하는 `codex resume/archive/unarchive` 자식 프로세스에도 같은 절대 `CODEX_HOME`을 전달합니다. 따라서 호출 shell이 가리키던 다른 home의 동일 UUID를 실수로 실행 대상으로 삼지 않습니다.
+
 ## Data Sources
 
 스크립트가 읽는 위치:
@@ -212,11 +215,11 @@ CODEX_HOME=/tmp/example-codex ./bin/csm --list all --all
 ```txt
 $CODEX_HOME/sessions
 $CODEX_HOME/archived_sessions
-$CODEX_HOME/state_5.sqlite
+${CODEX_SQLITE_HOME:-$CODEX_HOME}/state_5.sqlite
 $XDG_DATA_HOME/csm/quarantine/*/manifest.json
 ```
 
-`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. 이 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 기존처럼 초기 prompt를 표시합니다.
+`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. Codex가 별도 `CODEX_SQLITE_HOME`을 사용하면 CSM도 그 경로를 우선합니다. 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 초기 prompt로 계속 표시하되, plain/JSON 목록은 stderr에 경고하고 TUI는 상태줄에 실패 원인을 표시합니다. CSM은 SQLite를 변경하거나 migration하지 않으며, paginated remote history나 daemon 내부 상태 대신 위 로컬 transcript와 현재 `threads` metadata만 지원합니다.
 
 기본 `CODEX_HOME`은 `~/.codex`입니다.
 
@@ -235,6 +238,6 @@ codex unarchive <SESSION_UUID>
 ./smoke-test.sh
 ```
 
-테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL fixture를 만들고, `HOME`, `CODEX_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다. 이동 검증은 same-filesystem, 강제 EXDEV, 복사 실패, 원본 제거 실패, rollback 대상 충돌을 주입해 외부 파일의 bytes와 inode 및 transcript 복구본 보존을 확인합니다.
+테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL/SQLite fixture를 만들고, `HOME`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. resume/archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 선택 home 전달과 resume 직전 identity 변경 차단도 확인합니다. writer 검증은 임시 Codex 이름의 실행 파일과 argv[0]만 위장한 Node를 구분하며, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다. 이동 검증은 same-filesystem, 강제 EXDEV, 복사 실패, 원본 제거 실패, rollback 대상 충돌을 주입해 외부 파일의 bytes와 inode 및 transcript 복구본 보존을 확인합니다.
 
 설치 테스트 역시 임시 HOME만 사용하며 실제 `~/.local/bin`, `.bashrc`, `.zshrc`를 변경하지 않습니다.

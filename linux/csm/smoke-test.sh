@@ -16,6 +16,7 @@ fi
 INSTALLER="$SCRIPT_DIR/install-csm.sh"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 ORIGINAL_PATH="$PATH"
+NODE_BIN="$(command -v node)"
 REAL_HOME="${HOME:-}"
 REAL_CODEX_HOME="${CODEX_HOME:-}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/csm-test.XXXXXX")"
@@ -23,6 +24,8 @@ TEST_HOME="$TMP_DIR/home"
 TEST_CODEX_HOME="$TMP_DIR/codex-home"
 TEST_BIN="$TMP_DIR/bin"
 FAKE_CODEX_LOG="$TMP_DIR/fake-codex.log"
+FAKE_CODEX_HOME_LOG="$TMP_DIR/fake-codex-home.log"
+FAKE_WRITER_RUNTIME="$TMP_DIR/codex-fixture"
 QUARANTINE_ROOT="$TMP_DIR/xdg-data/csm/quarantine"
 PATH_WITH_FAKE="$TEST_BIN:$PATH"
 PROJECT_CWD="/tmp/csm-project"
@@ -72,11 +75,18 @@ mkdir -p "$TEST_HOME" "$TEST_CODEX_HOME/sessions/2026/07/20" \
   "$TMP_DIR/xdg-config" "$TMP_DIR/xdg-data" "$TMP_DIR/xdg-state" "$TMP_DIR/xdg-cache" \
   "$TEST_BIN"
 : > "$FAKE_CODEX_LOG"
+: > "$FAKE_CODEX_HOME_LOG"
+
+if ! ln "$NODE_BIN" "$FAKE_WRITER_RUNTIME" 2>/dev/null; then
+  cp -- "$NODE_BIN" "$FAKE_WRITER_RUNTIME"
+fi
+chmod +x "$FAKE_WRITER_RUNTIME"
 
 cat > "$TEST_BIN/codex" <<'FAKE_CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_CODEX_LOG"
+printf '%s\n' "${CODEX_HOME:-}" >> "$FAKE_CODEX_HOME_LOG"
 if [[ -n "${FAKE_CODEX_MUTATE_FILE:-}" && "$(wc -l < "$FAKE_CODEX_LOG")" -eq 1 ]]; then
   sed "1s/$FAKE_CODEX_OLD_ID/$FAKE_CODEX_NEW_ID/" "$FAKE_CODEX_MUTATE_FILE" > "$FAKE_CODEX_MUTATE_FILE.next"
   mv -- "$FAKE_CODEX_MUTATE_FILE.next" "$FAKE_CODEX_MUTATE_FILE"
@@ -312,15 +322,44 @@ fs.statSync = function statSyncWithProcDenial(file, options) {
 };
 PROC_FD_DENY
 
+cat > "$TMP_DIR/resume-identity-mutator.js" <<'RESUME_IDENTITY_MUTATOR'
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const originalOpenSync = fs.openSync.bind(fs);
+const target = path.resolve(process.env.CSM_TEST_RESUME_MUTATE_FILE || '/nonexistent');
+let targetReads = 0;
+
+fs.openSync = function openSyncWithResumeMutation(file, flags, ...args) {
+  if (path.resolve(String(file)) === target && flags === 'r') {
+    targetReads += 1;
+    if (targetReads === 2) {
+      const oldId = process.env.CSM_TEST_RESUME_OLD_ID;
+      const newId = process.env.CSM_TEST_RESUME_NEW_ID;
+      const replacement = `${target}.next`;
+      const content = fs.readFileSync(target, 'utf8').replace(oldId, newId);
+      fs.writeFileSync(replacement, content);
+      fs.renameSync(replacement, target);
+      fs.writeFileSync(process.env.CSM_TEST_RESUME_MARKER, 'mutated\n');
+    }
+  }
+  return originalOpenSync(file, flags, ...args);
+};
+RESUME_IDENTITY_MUTATOR
+
 isolated_env() {
   env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME \
     HOME="$TEST_HOME" \
     CODEX_HOME="$TEST_CODEX_HOME" \
+    CODEX_SQLITE_HOME="${CSM_TEST_SQLITE_HOME:-$TEST_CODEX_HOME}" \
     XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
     XDG_DATA_HOME="$TMP_DIR/xdg-data" \
     XDG_STATE_HOME="$TMP_DIR/xdg-state" \
     XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
     FAKE_CODEX_LOG="$FAKE_CODEX_LOG" \
+    FAKE_CODEX_HOME_LOG="$FAKE_CODEX_HOME_LOG" \
     PATH="$PATH_WITH_FAKE" \
     "$@"
 }
@@ -395,6 +434,8 @@ uuid_bj="019f1000-0000-7000-8000-000000000062"
 uuid_bk="019f1000-0000-7000-8000-000000000063"
 uuid_bl="019f1000-0000-7000-8000-000000000064"
 uuid_bm="019f1000-0000-7000-8000-000000000065"
+uuid_bn="019f1000-0000-7000-8000-000000000066"
+uuid_bo="019f1000-0000-7000-8000-000000000067"
 
 write_session() {
   local area="$1"
@@ -480,7 +521,8 @@ write_thread_title() {
   local session_id="$1"
   local title="$2"
   local first_user_message="$3"
-  SESSION_ID="$session_id" THREAD_TITLE="$title" FIRST_USER_MESSAGE="$first_user_message" DATABASE_PATH="$TEST_CODEX_HOME/state_5.sqlite" node --no-warnings <<'NODE'
+  local database_path="${4:-$TEST_CODEX_HOME/state_5.sqlite}"
+  SESSION_ID="$session_id" THREAD_TITLE="$title" FIRST_USER_MESSAGE="$first_user_message" DATABASE_PATH="$database_path" node --no-warnings <<'NODE'
 const {DatabaseSync} = require('node:sqlite');
 const database = new DatabaseSync(process.env.DATABASE_PATH);
 database.exec('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, first_user_message TEXT NOT NULL)');
@@ -537,6 +579,8 @@ run_tui() {
   local new_id="${5:-}"
   local manager_args="${6:-}"
   local wait_for_output="${7:-}"
+  local inherited_codex_home="${CSM_TEST_INHERITED_CODEX_HOME:-$TEST_CODEX_HOME}"
+  local sqlite_home="${CSM_TEST_SQLITE_HOME:-$TEST_CODEX_HOME}"
   if ! command -v script >/dev/null 2>&1; then
     printf 'script command is required for TUI mutation tests\n' >&2
     exit 1
@@ -570,7 +614,7 @@ except BrokenPipeError:
 os._exit(0)
 PY
   } | script -q -e -O "$log" -c \
-    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$TEST_CODEX_HOME' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/bin/csm' --cwd '$PROJECT_CWD' $manager_args" \
+    "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$inherited_codex_home' CODEX_SQLITE_HOME='$sqlite_home' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_HOME_LOG='$FAKE_CODEX_HOME_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/bin/csm' --cwd '$PROJECT_CWD' $manager_args" \
     >/dev/null
   local script_status="${PIPESTATUS[1]}"
   set -o pipefail
@@ -590,8 +634,16 @@ start_fake_writer() {
   : > "$WRITER_SIGNAL_LOG"
 
   (
-    exec -a "$process_name" node "$TMP_DIR/fake-codex-writer.js" \
-      "$file" "$ready_file" "$WRITER_SIGNAL_LOG" "$WRITER_CLOSE_TRIGGER"
+    if [[ "$process_name" == codex ]]; then
+      exec "$FAKE_WRITER_RUNTIME" "$TMP_DIR/fake-codex-writer.js" \
+        "$file" "$ready_file" "$WRITER_SIGNAL_LOG" "$WRITER_CLOSE_TRIGGER"
+    elif [[ "$process_name" == spoofed-codex ]]; then
+      exec -a codex "$NODE_BIN" "$TMP_DIR/fake-codex-writer.js" \
+        "$file" "$ready_file" "$WRITER_SIGNAL_LOG" "$WRITER_CLOSE_TRIGGER"
+    else
+      exec -a "$process_name" "$NODE_BIN" "$TMP_DIR/fake-codex-writer.js" \
+        "$file" "$ready_file" "$WRITER_SIGNAL_LOG" "$WRITER_CLOSE_TRIGGER"
+    fi
   ) &
   WRITER_PID=$!
   WRITER_PIDS+=("$WRITER_PID")
@@ -616,7 +668,7 @@ start_fake_reacquirer() {
   : > "$REACQUIRER_SIGNAL_LOG"
 
   (
-    exec -a codex node "$TMP_DIR/fake-codex-reacquirer.js" \
+    exec "$FAKE_WRITER_RUNTIME" "$TMP_DIR/fake-codex-reacquirer.js" \
       "$file" "$trigger_file" "$REACQUIRER_READY_FILE" "$REACQUIRER_SIGNAL_LOG"
   ) &
   REACQUIRER_PID=$!
@@ -740,6 +792,26 @@ assert_fake_calls() {
     exit 1
   fi
   : > "$FAKE_CODEX_LOG"
+  : > "$FAKE_CODEX_HOME_LOG"
+}
+
+assert_fake_calls_in_home() {
+  local expected_calls="$1"
+  local expected_home="$2"
+  local actual_calls actual_homes
+  actual_calls="$(cat "$FAKE_CODEX_LOG")"
+  actual_homes="$(cat "$FAKE_CODEX_HOME_LOG")"
+  if [[ "$actual_calls" != "$expected_calls" ]]; then
+    printf 'fake codex calls mismatch\nexpected:\n%s\nactual:\n%s\n' "$expected_calls" "$actual_calls" >&2
+    exit 1
+  fi
+  while IFS= read -r actual_home; do
+    [[ "$actual_home" == "$expected_home" ]] || \
+      fail "fake codex inherited the wrong CODEX_HOME: $actual_home"
+  done <<< "$actual_homes"
+  [[ -n "$actual_homes" ]] || fail 'fake codex home log is empty'
+  : > "$FAKE_CODEX_LOG"
+  : > "$FAKE_CODEX_HOME_LOG"
 }
 
 assert_no_fake_calls() {
@@ -874,6 +946,14 @@ write_non_rollout_filename "$uuid_aa" "2026-07-20T00:00:09" "case N non rollout 
 write_thread_title "$uuid_a" "case A renamed title" "case A later parent metadata"
 write_thread_title "$uuid_c" "case B subagent parent metadata" "case B subagent parent metadata"
 
+separate_sqlite_home="$TMP_DIR/separate-sqlite-home"
+mkdir -p "$separate_sqlite_home"
+write_thread_title \
+  "$uuid_a" \
+  "case A title from separate sqlite home" \
+  "case A later parent metadata" \
+  "$separate_sqlite_home/state_5.sqlite"
+
 json_output="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all --json)"
 assert_json_entry "$json_output" "case A later parent metadata" "entry.id === '$uuid_a' && entry.mutationSafe === true"
 assert_json_entry "$json_output" "case A later parent metadata" "entry.title === 'case A renamed title'"
@@ -886,6 +966,31 @@ assert_json_entry "$json_output" "case F malformed later line" "entry.id === '$u
 assert_json_entry "$json_output" "case K uppercase filename id" "entry.id === '$uuid_j' && entry.mutationSafe === true"
 assert_json_entry "$json_output" "case L terminal spoof" "entry.summary === 'case L terminal spoof' && !/[\\u0000-\\u001f\\u007f-\\u009f]/.test(entry.summary)"
 assert_json_entry "$json_output" "case N non rollout filename" "entry.mutationSafe === false && /filename/i.test(entry.unsafeReason || '')"
+
+separate_sqlite_output="$(
+  CSM_TEST_SQLITE_HOME="$separate_sqlite_home" \
+    isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list active --json
+)"
+assert_json_entry \
+  "$separate_sqlite_output" \
+  "case A later parent metadata" \
+  "entry.title === 'case A title from separate sqlite home'"
+
+broken_sqlite_home="$TMP_DIR/broken-sqlite-home"
+mkdir -p "$broken_sqlite_home"
+printf 'not a sqlite database\n' > "$broken_sqlite_home/state_5.sqlite"
+set +e
+CSM_TEST_SQLITE_HOME="$broken_sqlite_home" \
+  isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list active --json \
+    > "$TMP_DIR/broken-sqlite.json" 2> "$TMP_DIR/broken-sqlite.stderr"
+broken_sqlite_status=$?
+set -e
+[[ "$broken_sqlite_status" -eq 0 ]] || fail "broken title metadata listing exited $broken_sqlite_status"
+assert_contains "$(cat "$TMP_DIR/broken-sqlite.stderr")" 'csm: warning: thread title metadata could not be read'
+assert_json_entry \
+  "$(cat "$TMP_DIR/broken-sqlite.json")" \
+  "case A later parent metadata" \
+  "entry.title === ''"
 
 list_output="$(isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all)"
 assert_contains "$list_output" "unsafe:"
@@ -958,6 +1063,38 @@ move_copy_failure_file="$(write_session sessions "$uuid_bj" "$uuid_bj" "2026-07-
 move_cleanup_race_file="$(write_session sessions "$uuid_bk" "$uuid_bk" "2026-07-20T00:05:05" "case Move cleanup target race")"
 move_rollback_fail_file="$(write_session sessions "$uuid_bl" "$uuid_bl" "2026-07-20T00:05:06" "case Move rollback failure")"
 move_rollback_moved_file="$(write_session sessions "$uuid_bm" "$uuid_bm" "2026-07-20T00:05:07" "case Move rollback moved")"
+resume_home_file="$(write_session sessions "$uuid_bn" "$uuid_bn" "2026-07-20T00:06:01" "case Resume selected home")"
+resume_toctou_file="$(write_session sessions "$uuid_bo" "$uuid_bo" "2026-07-20T00:06:02" "case Resume TOCTOU identity")"
+
+other_codex_home="$TMP_DIR/other-codex-home"
+mkdir -p "$other_codex_home/sessions/2026/07/20"
+cp -- "$resume_home_file" "$other_codex_home/sessions/2026/07/20/$(basename -- "$resume_home_file")"
+
+CSM_TEST_INHERITED_CODEX_HOME="$other_codex_home" \
+  run_tui \
+    "/case Resume selected home\nrq" \
+    "$TMP_DIR/resume-selected-home.log" \
+    "" "" "" \
+    "--codex-home '$TEST_CODEX_HOME'"
+assert_fake_calls_in_home "resume $uuid_bn" "$TEST_CODEX_HOME"
+assert_contains "$(clean_log "$TMP_DIR/resume-selected-home.log")" "Returned from $uuid_bn"
+
+run_tui "/case C mismatched ids\nr\nq" "$TMP_DIR/resume-unsafe.log"
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/resume-unsafe.log")" 'Blocked resume'
+
+resume_toctou_marker="$TMP_DIR/resume-toctou.mutated"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/resume-identity-mutator.js"
+  export CSM_TEST_RESUME_MUTATE_FILE="$resume_toctou_file"
+  export CSM_TEST_RESUME_OLD_ID="$uuid_bo"
+  export CSM_TEST_RESUME_NEW_ID="$uuid_a"
+  export CSM_TEST_RESUME_MARKER="$resume_toctou_marker"
+  run_tui "/case Resume TOCTOU identity\nr\nq" "$TMP_DIR/resume-toctou.log"
+)
+[[ -s "$resume_toctou_marker" ]] || fail 'resume identity mutation fixture did not run'
+assert_no_fake_calls
+assert_contains "$(clean_log "$TMP_DIR/resume-toctou.log")" 'Blocked resume'
 
 # Writer recovery always uses a same-user fixture process. It never opens the
 # user's CODEX_HOME or a real Codex process.
@@ -1125,7 +1262,7 @@ run_tui "\t/case Writer archived session\nxq" "$TMP_DIR/writer-archived.log"
 assert_contains "$(clean_log "$TMP_DIR/writer-archived.log")" "Writer recovery is available only for active sessions"
 [[ -e "$writer_archived_file" ]] || fail 'writer recovery changed an archived transcript'
 
-start_fake_writer "$writer_unrecognized_file" holder
+start_fake_writer "$writer_unrecognized_file" spoofed-codex
 writer_unrecognized_pid="$WRITER_PID"
 writer_unrecognized_signal_log="$WRITER_SIGNAL_LOG"
 run_tui "/case Writer unrecognized holder\nx\nq" "$TMP_DIR/writer-unrecognized-holder.log"
@@ -1163,8 +1300,14 @@ assert_writer_alive_without_sigterm "$writer_identity_changes_pid" "$writer_iden
 assert_contains "$(clean_log "$TMP_DIR/writer-identity-changes.log")" "target dev/inode changed before SIGTERM"
 stop_fake_writer "$writer_identity_changes_pid"
 
-run_tui "/case G archive target\nbq" "$TMP_DIR/archive.log"
-assert_fake_calls "archive $uuid_l"
+cp -- "$archive_file" "$other_codex_home/sessions/2026/07/20/$(basename -- "$archive_file")"
+CSM_TEST_INHERITED_CODEX_HOME="$other_codex_home" \
+  run_tui \
+    "/case G archive target\nbq" \
+    "$TMP_DIR/archive.log" \
+    "" "" "" \
+    "--codex-home '$TEST_CODEX_HOME'"
+assert_fake_calls_in_home "archive $uuid_l" "$TEST_CODEX_HOME"
 assert_contains "$(clean_log "$TMP_DIR/archive.log")" "$uuid_l"
 
 run_tui "/case G delete target\ndQUARANTINE $uuid_m\nq" "$TMP_DIR/delete.log"
