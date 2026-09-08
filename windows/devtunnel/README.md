@@ -18,6 +18,8 @@ README.md
 - PowerShell `$PROFILE`에서 `devtunnel` 함수 제거
 - 실행 시 SSH host alias 입력
 - 실행 시 단일 포트 또는 여러 포트 입력
+- Windows IPv4 loopback(`127.0.0.1`)에만 명시적으로 bind
+- 모든 초기 포워딩 생성 성공을 요구하고 SSH 실패 종료를 호출자에게 전달
 - `Ctrl + C`로 열린 터널 종료
 - `devtunnel` 도움말 출력
 
@@ -59,6 +61,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 - SSH config를 만들거나 수정하지 않는지
 - `devtunnel -Help`, `devtunnel -h`, `Get-Help devtunnel -Detailed`이 동작하는지
 - `devtunnel 3000,5173 alias`가 올바른 SSH 포워딩 인자를 만드는지
+- `ExitOnForwardFailure=yes`와 명시적 `127.0.0.1` local bind를 전달하는지
+- 옵션처럼 시작하거나 공백이 있는 host alias와 중복 포트를 SSH 실행 전에 거부하는지
+- mock SSH 비정상 종료가 성공으로 처리되지 않는지
+- UTF-8 BOM·CRLF·한글·`[]` 경로의 기존 profile bytes가 제거 후 정확히 복원되는지
+- marker 충돌·managed block 수정·원자 교체 실패가 기존 bytes를 바꾸지 않는지
 - `uninstall`이 profile에서 함수 블록을 제거하는지
 
 ## 설치
@@ -139,18 +146,26 @@ Windows localhost:3123
 내부적으로는 다음 SSH 명령과 유사하게 동작합니다.
 
 ```powershell
-ssh -N -L 3123:127.0.0.1:3123 prox-dev-hoyoung
+ssh -o ExitOnForwardFailure=yes -N `
+  -L 127.0.0.1:3123:127.0.0.1:3123 `
+  prox-dev-hoyoung
 ```
 
 여러 포트를 열면 `-L` 인자가 포트 수만큼 추가됩니다.
 
 ```powershell
 ssh -N `
-  -L 3000:127.0.0.1:3000 `
-  -L 5173:127.0.0.1:5173 `
-  -L 6006:127.0.0.1:6006 `
+  -o ExitOnForwardFailure=yes `
+  -L 127.0.0.1:3000:127.0.0.1:3000 `
+  -L 127.0.0.1:5173:127.0.0.1:5173 `
+  -L 127.0.0.1:6006:127.0.0.1:6006 `
   prox-dev-hoyoung
 ```
+
+local bind 주소를 생략하지 않으므로 사용자 SSH 설정의 `GatewayPorts` 값과
+관계없이 Windows의 IPv4 loopback에서만 열립니다. 하나라도 초기 bind 또는
+forwarding 설정에 실패하면 `ExitOnForwardFailure=yes`로 SSH가 비정상 종료하고
+`devtunnel`도 오류를 반환합니다.
 
 ## 재설치
 
@@ -160,7 +175,9 @@ ssh -N `
 .\devtunnel-manager.ps1 reinstall
 ```
 
-`install`도 기존 managed function block을 제거한 뒤 다시 쓰기 때문에 사실상 재설치처럼 동작합니다.
+`install`과 `reinstall`은 설치된 managed block이 현재 버전과 byte-equivalent하면
+profile을 다시 쓰지 않습니다. marker는 같지만 내용이 다르거나 사용자가
+managed block을 수정한 경우에는 해당 내용을 덮어쓰지 않고 충돌로 중단합니다.
 
 ## 제거
 
@@ -201,7 +218,20 @@ devtunnel 3000,5173,6006 prox-dev-hoyoung
 # <<< devtunnel function <<<
 ```
 
+marker는 각각 정확히 하나여야 하고, block 전체가 현재 manager가 생성한 내용과
+일치해야 제거할 수 있습니다. 중복 marker, 한쪽 marker만 있는 경우, block 내부
+수정은 모두 profile을 변경하지 않고 오류로 종료합니다. 이전 버전이 만든
+서명 없는 block도 자동 변환하거나 삭제하지 않으므로 내용을 직접 검토한 뒤
+정리해야 합니다.
+
+profile은 `-LiteralPath` 의미의 .NET 파일 API로 읽고, 기존 BOM·encoding·개행과
+managed block 밖 bytes를 보존합니다. 같은 디렉터리의 임시 파일을 쓴 뒤
+원자적으로 교체하므로 쓰기/교체 실패 전에 원본을 삭제하지 않습니다.
+
 SSH config는 읽거나 쓰지 않습니다.
+
+SSH host alias는 빈 값, 공백 포함 값, `-`로 시작하는 옵션 형태를 거부합니다.
+SSH config의 정상적인 단일 alias(필요하면 `user@host`)를 사용하세요.
 
 ## 문제 해결
 
@@ -248,6 +278,9 @@ ssh prox-dev-hoyoung
 ### 포트가 이미 사용 중이라고 나올 때
 
 Windows에서 해당 포트를 이미 사용 중일 수 있습니다. 다른 포트로 개발 서버를 띄우거나, 직접 SSH 명령으로 로컬 포트와 원격 포트를 다르게 연결하세요.
+
+`devtunnel`은 요청한 포트 중 하나라도 초기 bind에 실패하면 터널 전체를
+실패로 처리합니다. 일부 포트만 열린 상태를 성공으로 안내하지 않습니다.
 
 ```powershell
 ssh -N -L 3001:127.0.0.1:3000 prox-dev-hoyoung
