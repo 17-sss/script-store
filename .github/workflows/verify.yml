@@ -17,6 +17,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install Linux verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck zsh
+          shellcheck --version
       - name: Full isolated Linux verification
         run: bash tests/audit-smoke.sh --full
 
@@ -31,12 +36,13 @@ jobs:
       - name: Contract checks
         run: python3 tests/check-contracts.py
       - name: Bash syntax
-        run: >-
-          bash -n linux/cxt/bin/cxt linux/cxt/install-cxt.sh
-          linux/cxt/tests/test-cxt.sh linux/omx-guard/omx-guard.sh
-          linux/omx-guard/smoke-test.sh
+        run: |
+          bash tests/check-shell-syntax.sh
+          bash tests/test-check-shell-syntax.sh
       - name: cxt isolated smoke
         run: bash linux/cxt/tests/test-cxt.sh
+        env:
+          TMPDIR: ${{ runner.temp }}/
       - name: OMX Guard isolated smoke
         run: bash linux/omx-guard/smoke-test.sh
 

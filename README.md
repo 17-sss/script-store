@@ -109,7 +109,7 @@ cxt --at <Tab>
 ```
 
 - 모든 실행에 `--no-alt-screen`을 기본 적용합니다.
-- `--xhigh`를 Codex의 최고 추론 강도 설정으로 변환합니다.
+- `--xhigh`를 `model_reasoning_effort="xhigh"`로 변환합니다. `max`와 `ultra`를 포함한 레벨 지원 여부는 모델마다 다릅니다.
 - `--madmax`를 `--yolo`로 변환합니다. 승인과 sandbox를 우회하므로 신뢰할 수 있는 작업에서만 사용하세요.
 - `--safe`를 read-only sandbox와 on-request 승인으로 변환합니다.
 - 모델 별칭은 검증한 list-visible catalog만 제공하고 retired 별칭은 명시적 오류로 안내합니다.
@@ -220,6 +220,12 @@ Windows, WSL, 관리자 권한이 필요합니다. `devtunnel`과 같은 포트�
 표로 출력합니다. `--quick`은 긴 csm PID namespace suite를 명시적으로 SKIP하고,
 `--full`은 포함합니다.
 
+셸 구문은 `tests/check-shell-syntax.sh`가 각 파일에 `bash -n`을 따로 적용합니다.
+두 번째 파일에 오류를 넣는 회귀 테스트로 검사 누락도 확인합니다. csm의 TUI
+테스트는 첫 화면을 기다린 뒤 키를 보내며, 확인 입력 후에도 다음 조작이
+가능한지 검증합니다. TUI 실행은 시간 제한을 두고, 실패하면 마지막 화면을
+CI 로그에 남깁니다.
+
 ```bash
 ./tests/audit-smoke.sh --quick
 ./tests/audit-smoke.sh --full
@@ -249,6 +255,10 @@ pwsh -NoProfile -File .\windows\wsl-portproxy\smoke-test.ps1
 suite, Windows PowerShell 5.1과 PowerShell 7의 두 mock suite를 별도 job/step으로
 실행합니다. SKIP은 성공 증거로 취급하지 않으며 실제 Windows bind·Ctrl+C·GPO,
 실제 macOS 통합은 별도 검증입니다.
+
+Linux CI는 ShellCheck와 Zsh를 명시적으로 설치합니다. 로컬에서 ShellCheck가
+없으면 cxt 테스트가 해당 검사를 SKIP하므로, 그 결과만으로 CI lint 통과를
+판단하지 않습니다. macOS cxt 테스트에는 끝에 `/`가 있는 `TMPDIR`도 적용합니다.
 
 ```powershell
 netsh interface portproxy show all

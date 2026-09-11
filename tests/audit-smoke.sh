@@ -51,17 +51,8 @@ if [[ "$MODE" == "contracts" ]]; then
   exit "$failures"
 fi
 
-run_case bash-syntax bash -n \
-  linux/agent-heartbeat/agent-heartbeat.sh \
-  linux/agent-heartbeat/smoke-test.sh \
-  linux/csm/install-csm.sh \
-  linux/csm/smoke-test.sh \
-  linux/cxt/bin/cxt \
-  linux/cxt/install-cxt.sh \
-  linux/cxt/tests/test-cxt.sh \
-  linux/omx-guard/omx-guard.sh \
-  linux/omx-guard/smoke-test.sh \
-  tests/audit-smoke.sh
+run_case bash-syntax bash tests/check-shell-syntax.sh
+run_case bash-syntax-regression bash tests/test-check-shell-syntax.sh
 run_case csm-node-syntax node --check linux/csm/bin/csm
 
 platform="$(uname -s 2>/dev/null || printf unknown)"
