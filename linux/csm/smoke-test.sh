@@ -289,6 +289,10 @@ fs.linkSync = function linkSyncWithMoveFault(source, target) {
 };
 
 fs.copyFileSync = function copyFileSyncWithMoveFault(source, target, flags) {
+  if (mode === 'exdev-success' && samePath(source, primarySource)) {
+    // Keep the mutation busy beyond the old 80 ms delay before the quit key.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 350);
+  }
   const result = originalCopyFileSync(source, target, flags);
   if (mode === 'exdev-copy-failure' && samePath(source, primarySource)) {
     recordPath(target, 'partial-copy');
@@ -625,11 +629,12 @@ data = sys.argv[1].encode('utf-8').decode('unicode_escape')
 log_path = sys.argv[2]
 wait_for_output = sys.argv[3].encode('utf-8')
 
-def await_output(expected):
+def await_output(expected, offset=0):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
             with open(log_path, 'rb') as output:
+                output.seek(offset)
                 screen = re.sub(rb'\x1b\[[0-?]*[ -/]*[@-~]', b'', output.read())
                 if expected in screen:
                     return
@@ -642,9 +647,15 @@ try:
     # Never send '/' while the PTY is still in canonical mode. A slow startup
     # otherwise echoes/drops the search prefix and subsequent keys run unfiltered.
     await_output(b'csm | View:')
-    for char in data:
-        if char == 'q' and wait_for_output:
-            await_output(wait_for_output)
+    previous_input_offset = 0
+    for index, char in enumerate(data):
+        if char == 'q' and index == len(data) - 1:
+            # Mutations can leave stdin suspended after the confirmation. Only
+            # quit after a new list render, never an earlier search/ready frame.
+            await_output(b'csm | View:', previous_input_offset)
+            if wait_for_output:
+                await_output(wait_for_output)
+        previous_input_offset = os.path.getsize(log_path)
         os.write(1, char.encode('utf-8'))
         time.sleep(0.6 if char == 'x' else 0.08)
 except BrokenPipeError:
