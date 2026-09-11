@@ -34,6 +34,14 @@ AUXILIARY_PIDS=()
 
 safe_cleanup() {
   local status=$?
+  if [[ "$status" -ne 0 && -f "$TMP_DIR/last-tui-log" ]]; then
+    local failed_log
+    IFS= read -r failed_log < "$TMP_DIR/last-tui-log" || true
+    if [[ "$failed_log" == "$TMP_DIR/"* && -f "$failed_log" ]]; then
+      printf '\nLast TUI output (%s):\n' "$failed_log" >&2
+      clean_log "$failed_log" | tail -100 >&2
+    fi
+  fi
   local writer_pid
   for writer_pid in "${WRITER_PIDS[@]}"; do
     if [[ "$writer_pid" =~ ^[0-9]+$ ]] && kill -0 "$writer_pid" 2>/dev/null; then
@@ -93,6 +101,11 @@ if [[ -n "${FAKE_CODEX_MUTATE_FILE:-}" && "$(wc -l < "$FAKE_CODEX_LOG")" -eq 1 ]
 fi
 FAKE_CODEX
 chmod +x "$TEST_BIN/codex"
+
+# Reproduce a runner where input arrives before Node finishes starting the TUI.
+cat > "$TMP_DIR/startup-delay.js" <<'STARTUP_DELAY'
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 350);
+STARTUP_DELAY
 
 cat > "$TMP_DIR/fake-codex-writer.js" <<'FAKE_WRITER'
 'use strict';
@@ -595,42 +608,60 @@ run_tui() {
     printf 'script command is required for TUI mutation tests\n' >&2
     exit 1
   fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    fail 'timeout command is required to bound TUI fixture failures'
+  fi
+  printf '%s\n' "$log" > "$TMP_DIR/last-tui-log"
+  : > "$log"
   set +o pipefail
   {
     python3 - "$keys" "$log" "$wait_for_output" <<'PY'
 import os
+import re
 import sys
 import time
 
 data = sys.argv[1].encode('utf-8').decode('unicode_escape')
 log_path = sys.argv[2]
 wait_for_output = sys.argv[3].encode('utf-8')
+
+def await_output(expected):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            with open(log_path, 'rb') as output:
+                screen = re.sub(rb'\x1b\[[0-?]*[ -/]*[@-~]', b'', output.read())
+                if expected in screen:
+                    return
+        except FileNotFoundError:
+            pass
+        time.sleep(0.02)
+    raise RuntimeError(f'TUI output timed out waiting for {expected!r}: {log_path}')
+
 try:
+    # Never send '/' while the PTY is still in canonical mode. A slow startup
+    # otherwise echoes/drops the search prefix and subsequent keys run unfiltered.
+    await_output(b'csm | View:')
     for char in data:
         if char == 'q' and wait_for_output:
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                try:
-                    with open(log_path, 'rb') as output:
-                        if wait_for_output in output.read():
-                            break
-                except FileNotFoundError:
-                    pass
-                time.sleep(0.05)
+            await_output(wait_for_output)
         os.write(1, char.encode('utf-8'))
         time.sleep(0.6 if char == 'x' else 0.08)
 except BrokenPipeError:
-    os._exit(0)
+    sys.exit('TUI exited before all fixture input was sent')
+except RuntimeError as error:
+    os.write(1, b'\x03')
+    sys.exit(str(error))
 os._exit(0)
 PY
-  } | script -q -e -O "$log" -c \
+  } | timeout 45s script -q -e -f -O "$log" -c \
     "stty cols 120 rows 28; env -u NVM_DIR -u FNM_DIR -u VOLTA_HOME HOME='$TEST_HOME' CODEX_HOME='$inherited_codex_home' CODEX_SQLITE_HOME='$sqlite_home' XDG_CONFIG_HOME='$TMP_DIR/xdg-config' XDG_DATA_HOME='$TMP_DIR/xdg-data' XDG_STATE_HOME='$TMP_DIR/xdg-state' XDG_CACHE_HOME='$TMP_DIR/xdg-cache' FAKE_CODEX_LOG='$FAKE_CODEX_LOG' FAKE_CODEX_HOME_LOG='$FAKE_CODEX_HOME_LOG' FAKE_CODEX_MUTATE_FILE='$mutate_file' FAKE_CODEX_OLD_ID='$old_id' FAKE_CODEX_NEW_ID='$new_id' PATH='$PATH_WITH_FAKE' '$SCRIPT_DIR/bin/csm' --cwd '$PROJECT_CWD' $manager_args" \
     >/dev/null
-  local script_status="${PIPESTATUS[1]}"
+  local pipeline_status=("${PIPESTATUS[@]}")
   set -o pipefail
-  if [[ "$script_status" -ne 0 ]]; then
-    printf 'TUI script run failed with exit %s\n' "$script_status" >&2
-    exit "$script_status"
+  if [[ "${pipeline_status[0]}" -ne 0 || "${pipeline_status[1]}" -ne 0 ]]; then
+    printf 'TUI run failed: input=%s script=%s\n' "${pipeline_status[0]}" "${pipeline_status[1]}" >&2
+    exit 1
   fi
 }
 
@@ -1114,7 +1145,8 @@ other_codex_home="$TMP_DIR/other-codex-home"
 mkdir -p "$other_codex_home/sessions/2026/07/20"
 cp -- "$resume_home_file" "$other_codex_home/sessions/2026/07/20/$(basename -- "$resume_home_file")"
 
-CSM_TEST_INHERITED_CODEX_HOME="$other_codex_home" \
+NODE_OPTIONS="--require=$TMP_DIR/startup-delay.js" \
+  CSM_TEST_INHERITED_CODEX_HOME="$other_codex_home" \
   run_tui \
     "/case Resume selected home\nrq" \
     "$TMP_DIR/resume-selected-home.log" \
@@ -1123,9 +1155,10 @@ CSM_TEST_INHERITED_CODEX_HOME="$other_codex_home" \
 assert_fake_calls_in_home "resume $uuid_bn" "$TEST_CODEX_HOME"
 assert_contains "$(clean_log "$TMP_DIR/resume-selected-home.log")" "Returned from $uuid_bn"
 
-run_tui "/case C mismatched ids\nr\nq" "$TMP_DIR/resume-unsafe.log"
+run_tui "/case C mismatched ids\nr\naq" "$TMP_DIR/resume-unsafe.log"
 assert_no_fake_calls
 assert_contains "$(clean_log "$TMP_DIR/resume-unsafe.log")" 'Blocked resume'
+assert_contains "$(clean_log "$TMP_DIR/resume-unsafe.log")" 'Showing all cwd values'
 
 resume_toctou_marker="$TMP_DIR/resume-toctou.mutated"
 (

@@ -2056,6 +2056,8 @@ function resumeTui(state) {
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
   }
+  // readline.close() pauses its input; keep the TUI alive after confirmation.
+  process.stdin.resume();
   process.stdout.write('\x1b[?25l');
   state.suspended = false;
 }

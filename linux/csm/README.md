@@ -242,3 +242,8 @@ codex unarchive <SESSION_UUID>
 테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL/SQLite fixture를 만들고, `HOME`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. resume/archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 선택 home 전달과 resume 직전 identity 변경 차단도 확인합니다. writer 검증은 임시 Codex 이름의 실행 파일과 argv[0]만 위장한 Node를 구분하며, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다. 이동 검증은 same-filesystem, 강제 EXDEV, 복사 실패, 원본 제거 실패, rollback 대상 충돌을 주입해 외부 파일의 bytes와 inode 및 transcript 복구본 보존을 확인합니다.
 
 설치 테스트 역시 임시 HOME만 사용하며 실제 `~/.local/bin`, `.bashrc`, `.zshrc`를 변경하지 않습니다.
+
+Linux TUI 테스트에는 util-linux의 `script`와 coreutils의 `timeout`도 필요합니다.
+첫 화면을 확인한 뒤 입력을 보내며, 시작을 일부러 늦춘 resume fixture와
+확인창을 닫은 뒤 이어서 조작하는 fixture를 포함합니다. 입력/실행 실패를
+각각 검사하고, 실행당 45초 제한과 실패 시 마지막 TUI 로그 출력을 적용합니다.
