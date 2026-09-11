@@ -1729,7 +1729,8 @@ function inspectProcessForTarget(pid, target, options) {
   );
 
   const descriptorScan = inspectProcessDescriptors(pid, target, options);
-  if (!descriptorScan.ok) {
+  if (!descriptorScan.ok || (processText.executableWarning && !descriptorScan.holdsTarget)) {
+    const inspectionReason = [processText.executableWarning, descriptorScan.reason].filter(Boolean).join('; ');
     if (descriptorScan.gone) {
       return {available: true, exists: false, holdsTarget: false};
     }
@@ -1767,7 +1768,7 @@ function inspectProcessForTarget(pid, target, options) {
     if (currentProcessText.name !== processText.name || currentProcessText.command !== processText.command) {
       return unavailableProcessInspection(`process identity changed while inspecting file descriptors for PID ${pid}`);
     }
-    return incompleteNonCodexProcessInspection(pid, identity.value, processText, descriptorScan.reason);
+    return incompleteNonCodexProcessInspection(pid, identity.value, processText, inspectionReason);
   }
 
   return {
@@ -1911,8 +1912,23 @@ function readProcessText(pid) {
     const argv = fs.readFileSync(path.join('/proc', String(pid), 'cmdline'), 'utf8')
       .split('\0')
       .filter(Boolean);
-    const executable = fs.readlinkSync(path.join('/proc', String(pid), 'exe')).replace(/ \(deleted\)$/, '');
-    return {ok: true, name, argv, command: argv.join(' '), executable};
+    let executable = '';
+    let executableWarning = '';
+    try {
+      executable = fs.readlinkSync(path.join('/proc', String(pid), 'exe')).replace(/ \(deleted\)$/, '');
+    } catch (error) {
+      // Some same-user system processes expose comm/cmdline but deny exe and
+      // fd access. Keep these as incomplete diagnostics, never verified writers.
+      // Missing/ambiguous text and anything naming Codex must still fail closed.
+      if (
+        !['EACCES', 'EPERM'].includes(error.code) ||
+        !name || !argv[0] || [name, argv[0]].some(isCodexProcessName)
+      ) {
+        throw error;
+      }
+      executableWarning = `could not read /proc/${pid}/exe: ${error.message}`;
+    }
+    return {ok: true, name, argv, command: argv.join(' '), executable, executableWarning};
   } catch (error) {
     return processGone(error)
       ? {ok: false, gone: true}
@@ -1920,15 +1936,16 @@ function readProcessText(pid) {
   }
 }
 
+function isCodexProcessName(candidate) {
+  const base = path.basename(String(candidate)).toLowerCase();
+  return base === 'codex' || /^codex[-_.][a-z0-9_.-]+$/.test(base);
+}
+
 function reliablyIdentifiesCodexProcess(name, argv, executable) {
-  const isCodexName = (candidate) => {
-    const base = path.basename(String(candidate)).toLowerCase();
-    return base === 'codex' || /^codex[-_.][a-z0-9_.-]+$/.test(base);
-  };
-  if (!executable || !isCodexName(executable)) {
+  if (!executable || !isCodexProcessName(executable)) {
     return false;
   }
-  return [name, argv[0]].filter(Boolean).some(isCodexName);
+  return [name, argv[0]].filter(Boolean).some(isCodexProcessName);
 }
 
 function processGone(error) {
@@ -2693,18 +2710,21 @@ function loadThreadTitles(sqliteHome) {
     }
     const database = new DatabaseSync(databasePath, {readOnly: true});
     try {
+      const hasName = database.prepare('PRAGMA table_info(threads)').all()
+        .some((column) => column.name === 'name');
       const rows = database.prepare(`
-        SELECT id, title, first_user_message
+        SELECT id, title, first_user_message, ${hasName ? 'name' : 'NULL AS name'}
         FROM threads
-        WHERE trim(title) <> ''
       `).all();
       return {titles: new Map(rows
-        .filter((row) => (
-          normalizeUuid(row.id) &&
-          typeof row.title === 'string' &&
-          normalizeStoredText(row.title) !== normalizeStoredText(row.first_user_message)
-        ))
-        .map((row) => [normalizeUuid(row.id), row.title])), warning: ''};
+        .map((row) => {
+          const name = sanitizeTerminalText(row.name).trim();
+          const legacyTitle = typeof row.title === 'string' &&
+            normalizeStoredText(row.title) !== normalizeStoredText(row.first_user_message)
+            ? row.title : '';
+          return [normalizeUuid(row.id), name || legacyTitle];
+        })
+        .filter(([id, title]) => id && title)), warning: ''};
     } finally {
       database.close();
     }

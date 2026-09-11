@@ -302,6 +302,16 @@ const path = require('path');
 
 const originalReaddirSync = fs.readdirSync.bind(fs);
 const originalStatSync = fs.statSync.bind(fs);
+const originalReadlinkSync = fs.readlinkSync.bind(fs);
+fs.readlinkSync = function readlinkSyncWithProcDenial(file, options) {
+  const denied = process.env.CSM_TEST_DENY_PROC_EXE;
+  if (denied && path.resolve(file) === path.resolve(denied)) {
+    const error = new Error(`EACCES: permission denied, readlink '${file}'`);
+    error.code = 'EACCES';
+    throw error;
+  }
+  return originalReadlinkSync(file, options);
+};
 fs.readdirSync = function readdirSyncWithProcDenial(directory, options) {
   const denied = process.env.CSM_TEST_DENY_PROC_FD;
   if (denied && path.resolve(directory) === path.resolve(denied)) {
@@ -1010,6 +1020,40 @@ unrenamed_title_log="$(clean_log "$TMP_DIR/unrenamed-title.log")"
 assert_contains "$unrenamed_title_log" "name: case B subagent parent metadata"
 assert_contains "$unrenamed_title_log" "prompt: case B subagent parent metadata"
 
+# Current Desktop metadata separates the user-facing name from the old title.
+# Keep the preceding fixtures without a name column to cover older databases.
+modern_sqlite_home="$TMP_DIR/modern-sqlite-home"
+mkdir -p "$modern_sqlite_home"
+cp "$TEST_CODEX_HOME/state_5.sqlite" "$modern_sqlite_home/state_5.sqlite"
+DATABASE_PATH="$modern_sqlite_home/state_5.sqlite" \
+  NAME_ID="$uuid_a" SAME_PROMPT_ID="$uuid_c" NAME_ONLY_ID="$uuid_i" \
+  BLANK_NAME_ID="$uuid_j" UNSAFE_NAME_ID="$uuid_e" node --no-warnings <<'NODE'
+const {DatabaseSync} = require('node:sqlite');
+const db = new DatabaseSync(process.env.DATABASE_PATH);
+db.exec('ALTER TABLE threads ADD COLUMN name TEXT');
+db.prepare('UPDATE threads SET name = ? WHERE id = ?')
+  .run('\x1b[2JDesktop renamed task\x07', process.env.NAME_ID);
+db.prepare('UPDATE threads SET name = first_user_message WHERE id = ?')
+  .run(process.env.SAME_PROMPT_ID);
+const insert = db.prepare('INSERT INTO threads (id, title, first_user_message, name) VALUES (?, ?, ?, ?)');
+insert.run(process.env.NAME_ONLY_ID, '', 'original prompt', 'Desktop name without title');
+insert.run(process.env.BLANK_NAME_ID, 'Legacy renamed title', 'original prompt', ' \t ');
+insert.run(process.env.UNSAFE_NAME_ID, '', 'original prompt', 'Unsafe Desktop name');
+db.close();
+NODE
+modern_output="$(CSM_TEST_SQLITE_HOME="$modern_sqlite_home" \
+  isolated_env "$SCRIPT_DIR/bin/csm" --cwd "$PROJECT_CWD" --list all --json)"
+assert_json_entry "$modern_output" "case A later parent metadata" "entry.title === 'Desktop renamed task'"
+assert_json_entry "$modern_output" "case B subagent parent metadata" "entry.title === entry.summary"
+assert_json_entry "$modern_output" "case F malformed later line" "entry.title === 'Desktop name without title'"
+assert_json_entry "$modern_output" "case K uppercase filename id" "entry.title === 'Legacy renamed title'"
+assert_json_entry "$modern_output" "case C mismatched ids" "entry.title === '' && !entry.mutationSafe"
+CSM_TEST_SQLITE_HOME="$modern_sqlite_home" \
+  run_tui "/Desktop renamed task\nq" "$TMP_DIR/desktop-renamed-title.log"
+modern_title_log="$(clean_log "$TMP_DIR/desktop-renamed-title.log")"
+assert_contains "$modern_title_log" "name: Desktop renamed task"
+assert_contains "$modern_title_log" "prompt: case A later parent metadata"
+
 if ! command -v script >/dev/null 2>&1; then
   printf 'script command is required; refusing to skip TUI mutation safety tests\n' >&2
   exit 1
@@ -1110,6 +1154,7 @@ writer_success_signal_log="$WRITER_SIGNAL_LOG"
 (
   export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
   export CSM_TEST_DENY_PROC_FD_STAT="/proc/$LIVE_PROCESS_PID/fd"
+  export CSM_TEST_DENY_PROC_EXE="/proc/$LIVE_PROCESS_PID/exe"
   run_tui "/case Writer recovery success\nxTERMINATE WRITER $uuid_aj $writer_success_pid\nq" \
     "$TMP_DIR/writer-success.log" "" "" "" "" 'Writer recovery succeeded'
 )
@@ -1130,6 +1175,8 @@ assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "Writer recovery su
 assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" \
   "1 non-Codex process could not be fully inspected"
 assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "PID $LIVE_PROCESS_PID"
+assert_contains "$(clean_log "$TMP_DIR/writer-success.log")" "/proc/$LIVE_PROCESS_PID/exe"
+kill -0 "$LIVE_PROCESS_PID" || fail 'writer recovery terminated the unrelated process'
 assert_contains "$(cat "$writer_success_signal_log")" 'SIGTERM'
 [[ -e "$writer_success_file" ]] || fail 'writer recovery changed the transcript file'
 [[ "$(sha256sum "$writer_success_file")" == "$writer_success_digest" ]] || \
@@ -1149,6 +1196,19 @@ assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-live-process.log")" "PI
 [[ -e "$writer_no_holder_file" ]] || fail 'incomplete writer diagnostics changed the transcript file'
 stop_auxiliary_process "$LIVE_PROCESS_PID"
 
+# Even when FD inspection succeeds, an unreadable non-Codex executable is an
+# incomplete diagnosis, not proof that no local holder exists.
+start_same_user_live_process
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_EXE="/proc/$LIVE_PROCESS_PID/exe"
+  run_tui "/case Writer no local holder\nx\nq" "$TMP_DIR/writer-unreadable-exe.log"
+)
+assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-exe.log")" "No verified local writer holds this transcript"
+assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-exe.log")" "/proc/$LIVE_PROCESS_PID/exe"
+kill -0 "$LIVE_PROCESS_PID" || fail 'unreadable executable diagnosis terminated a process'
+stop_auxiliary_process "$LIVE_PROCESS_PID"
+
 start_fake_writer "$writer_unreadable_codex_file" codex
 writer_unreadable_codex_pid="$WRITER_PID"
 writer_unreadable_codex_signal_log="$WRITER_SIGNAL_LOG"
@@ -1160,7 +1220,30 @@ writer_unreadable_codex_signal_log="$WRITER_SIGNAL_LOG"
 assert_writer_alive_without_sigterm "$writer_unreadable_codex_pid" "$writer_unreadable_codex_signal_log"
 assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-codex.log")" \
   "Writer recovery unavailable: could not inspect file descriptors for Codex candidate PID $writer_unreadable_codex_pid"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_EXE="/proc/$writer_unreadable_codex_pid/exe"
+  run_tui "/case Writer unreadable Codex candidate\nx\nq" "$TMP_DIR/writer-unreadable-codex-exe.log"
+)
+assert_writer_alive_without_sigterm "$writer_unreadable_codex_pid" "$writer_unreadable_codex_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-unreadable-codex-exe.log")" \
+  "Writer recovery unavailable: could not read process name/command for PID $writer_unreadable_codex_pid"
 stop_fake_writer "$writer_unreadable_codex_pid"
+
+# A readable target FD remains an unrecognized holder when exe is denied.
+# It must block termination, not disappear into the incomplete-process warnings.
+start_fake_writer "$writer_unrecognized_file" unrelated-fixture
+writer_denied_exe_pid="$WRITER_PID"
+writer_denied_exe_signal_log="$WRITER_SIGNAL_LOG"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_EXE="/proc/$writer_denied_exe_pid/exe"
+  run_tui "/case Writer unrecognized holder\nx\nq" "$TMP_DIR/writer-holder-unreadable-exe.log"
+)
+assert_writer_alive_without_sigterm "$writer_denied_exe_pid" "$writer_denied_exe_signal_log"
+assert_contains "$(clean_log "$TMP_DIR/writer-holder-unreadable-exe.log")" \
+  "Writer recovery blocked: an unrecognized local process holds this transcript"
+stop_fake_writer "$writer_denied_exe_pid"
 
 start_fake_writer "$writer_wrong_confirmation_file" codex
 writer_wrong_pid="$WRITER_PID"

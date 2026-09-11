@@ -46,7 +46,7 @@ repo 루트에서 실행:
 
 기본 화면은 **현재 실행한 폴더와 그 하위 폴더에서 열린 Codex 세션**만 보여줍니다. 전체 로컬 세션을 보고 싶으면 TUI 안에서 `a`를 누르세요.
 
-목록 제목은 Codex에서 rename한 세션 이름을 우선 표시합니다. 이름이 없으면 초기 prompt를 대신 표시하며, 하단 상세에는 rename 이름과 초기 prompt를 모두 표시합니다.
+목록 제목은 Codex에서 rename한 세션 이름(`threads.name`)을 우선 표시합니다. 이름이 없으면 기존 `threads.title`의 사용자 지정 제목, 초기 prompt 순으로 대신 표시하며, 하단 상세에는 rename 이름과 초기 prompt를 모두 표시합니다. `name` 컬럼이 없는 구형 DB도 지원합니다. 실행 중 Desktop에서 이름을 바꿨다면 `R`로 다시 읽습니다.
 
 ## 화면 읽는 법
 
@@ -119,6 +119,7 @@ Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키�
 - 실행 직전에 기존 변경 작업과 같은 안전 gate를 적용합니다. filename UUID와 첫 번째 `session_meta.payload.id`가 일치하고, 정확한 active sessions root 아래 JSONL이어야 합니다.
 - 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. FD보다 먼저 process start identity, name/command, `/proc/<pid>/exe`의 실제 실행 파일을 읽고 Codex 후보인지 분류합니다. argv[0]만 `codex`로 바꾼 Node 같은 프로세스는 Codex 후보로 인정하지 않습니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다.
 - Codex 후보의 FD를 완전히 읽을 수 없으면 진단 불가로 표시하고 어떤 프로세스도 종료하지 않습니다. name/command가 안정적으로 비-Codex로 확인된 프로세스의 FD만 권한 때문에 읽을 수 없으면 PID, name/command, 실패 원인을 경고로 표시하되 검증된 Codex writer 탐색은 계속합니다. 따라서 전체 로컬 holder 부재를 증명하지는 않으며, 읽을 수 있는 비-Codex 프로세스가 실제 target `dev`/`ino`를 잡고 있으면 기존처럼 종료를 차단합니다.
+- `(sd-pam)`처럼 name/command는 읽히지만 `/proc/<pid>/exe` 접근이 거부되는 비-Codex 프로세스도 불완전한 진단으로 경고하고 탐색을 계속합니다. 이름이나 argv[0]이 Codex 후보이거나 비어 있으면 이 예외를 적용하지 않습니다. 실행 파일을 확인하지 못한 프로세스는 종료 후보로 인정하지 않으며, 읽을 수 있는 FD가 대상 transcript를 잡고 있다면 종료를 차단합니다.
 - PID, process name/command, 그 프로세스가 함께 열고 있는 다른 Codex transcript 수를 terminal-control sanitization 후 보여 줍니다.
 - 완전히 검사한 결과 local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. 일부 non-Codex 프로세스의 FD를 검사하지 못했다면 `No verified local writer holds this transcript`와 경고를 함께 표시합니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
 
@@ -219,7 +220,7 @@ ${CODEX_SQLITE_HOME:-$CODEX_HOME}/state_5.sqlite
 $XDG_DATA_HOME/csm/quarantine/*/manifest.json
 ```
 
-`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. Codex가 별도 `CODEX_SQLITE_HOME`을 사용하면 CSM도 그 경로를 우선합니다. 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 초기 prompt로 계속 표시하되, plain/JSON 목록은 stderr에 경고하고 TUI는 상태줄에 실패 원인을 표시합니다. CSM은 SQLite를 변경하거나 migration하지 않으며, paginated remote history나 daemon 내부 상태 대신 위 로컬 transcript와 현재 `threads` metadata만 지원합니다.
+`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. `threads.name`을 우선 사용하고, 비어 있거나 컬럼이 없으면 초기 prompt와 다른 `threads.title`을 사용합니다. Codex가 별도 `CODEX_SQLITE_HOME`을 사용하면 CSM도 그 경로를 우선합니다. 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 초기 prompt로 계속 표시하되, plain/JSON 목록은 stderr에 경고하고 TUI는 상태줄에 실패 원인을 표시합니다. CSM은 SQLite를 변경하거나 migration하지 않으며, paginated remote history나 daemon 내부 상태 대신 위 로컬 transcript와 현재 `threads` metadata만 지원합니다.
 
 기본 `CODEX_HOME`은 `~/.codex`입니다.
 
