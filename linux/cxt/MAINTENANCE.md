@@ -4,12 +4,25 @@
 
 ## 마지막 검토 기준
 
-- 검토일: 2026-09-08
-- Codex CLI: `codex-cli 0.153.4`
+- 검토일: 2026-09-11
+- Codex CLI: `codex-cli 0.154.0`
 - 로컬 모델 카탈로그 client version: `0.153.4`
 - 공식 기준: [Codex configuration reference](https://developers.openai.com/codex/config-reference), 현재 CLI 도움말, 현재 사용자에게 노출된 로컬 모델 카탈로그
 
-이번 기준점에서 `gpt-5.4`는 list-visible 카탈로그에 없으므로 `--gpt54` 별칭을 retired 처리했습니다. 또한 현재 CLI 플래그 파서는 `--ask-for-approval`에 `on-request`와 `never`만 허용하므로, `--safe`는 `read-only + on-request`로 검증합니다. 설정 파일이 지원하는 값과 CLI 플래그가 실제로 받는 값이 다를 수 있으므로 둘을 구분해 확인합니다.
+이번 기준점에서 `gpt-6-astra`가 list-visible이므로 `--astra`를 추가했습니다.
+`gpt-5.4`와 `gpt-5.4-mini`는 list-visible 카탈로그에 없으므로 `--gpt54`와
+`--mini`는 retired 상태입니다. 네이티브 `--model` 전달은 유지합니다.
+모델 캐시는 2026-09-11에 갱신되었지만 client version은 `0.153.4`이므로,
+설치된 CLI `0.154.0`과 구분해 기록합니다. Astra slug는
+[공식 모델 문서](https://developers.openai.com/api/docs/models/gpt-6-astra)와도
+교차 확인했으며, 편의 별칭 자격은 현재 로컬 list-visible 카탈로그 기준입니다.
+현재 CLI 플래그 파서는 `--ask-for-approval`에 `on-request`와 `never`만 허용하므로,
+`--safe`는 `read-only + on-request`로 검증합니다. 설정 파일이 지원하는 값과
+CLI 플래그가 실제로 받는 값이 다를 수 있으므로 둘을 구분해 확인합니다.
+
+CI 재현에서는 ShellCheck SC2016의 의도적인 rc 문자열을 줄 단위로 명시하고,
+macOS의 trailing-slash TMPDIR를 물리 경로로 정규화했습니다. 검사를 끄거나
+비교 조건을 완화하지 않고 기존 설치/인자 전달 계약을 유지합니다.
 
 이 값은 호환성 보장이 아니라 다음 점검에서 차이를 찾기 위한 기준점입니다. 유지보수 작업을 마칠 때 검토일과 버전을 현재 확인값으로 갱신합니다.
 

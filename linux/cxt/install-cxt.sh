@@ -9,6 +9,8 @@ COMPLETION_MARKER_BEGIN='# >>> script-store cxt completion >>>'
 COMPLETION_MARKER_END='# <<< script-store cxt completion <<<'
 LEGACY_MARKER_BEGIN='# >>> script-store cx >>>'
 LEGACY_MARKER_END='# <<< script-store cx <<<'
+# Preserve variables for the user's shell when it later reads the rc file.
+# shellcheck disable=SC2016
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 TRANSACTION_ACTIVE=0
 TRANSACTION_BACKUP=
@@ -475,7 +477,7 @@ case "$SHELL_MODE" in
     case "${SHELL:-}" in
       */zsh|zsh) SELECTED_SHELL=zsh ;;
       */bash|bash) SELECTED_SHELL=bash ;;
-      *) die 'could not detect bash or zsh from $SHELL; use --shell zsh or --shell bash' ;;
+      *) die 'could not detect bash or zsh from the SHELL environment variable; use --shell zsh or --shell bash' ;;
     esac
     ;;
   zsh|bash)

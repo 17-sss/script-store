@@ -12,11 +12,11 @@ Usage: cxt [CXT_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]
 
 cxt shortcuts:
   Models:
+    --astra     --model gpt-6-astra
     --sol       --model gpt-5.6-sol
     --terra     --model gpt-5.6-terra
     --luna      --model gpt-5.6-luna
     --gpt55     --model gpt-5.5
-    --mini      --model gpt-5.4-mini
     --spark     --model gpt-5.3-codex-spark
 
   Reasoning (model support varies):
@@ -344,6 +344,10 @@ while [ "$#" -gt 0 ]; do
     --kill-all|--ka)
       add_session_action kill-all "$arg"
       ;;
+    --astra)
+      codex_input_seen=1
+      add_model_shortcut "$arg" gpt-6-astra
+      ;;
     --sol)
       codex_input_seen=1
       add_model_shortcut "$arg" gpt-5.6-sol
@@ -366,8 +370,9 @@ while [ "$#" -gt 0 ]; do
       exit 2
       ;;
     --mini)
-      codex_input_seen=1
-      add_model_shortcut "$arg" gpt-5.4-mini
+      printf '%s\n' \
+        'cxt: --mini is retired because gpt-5.4-mini is not list-visible; use --luna or --model gpt-5.4-mini directly if your account exposes it' >&2
+      exit 2
       ;;
     --spark)
       codex_input_seen=1

@@ -67,11 +67,17 @@ require(
     "linux/cxt/bin/cxt",
     "read-only + on-request approvals",
     "gpt-5.4 is not list-visible",
+    "gpt-5.4-mini is not list-visible",
+    'add_model_shortcut "$arg" gpt-6-astra',
     "validate_cxt_session_name",
     "/bin/cat",
 )
 forbid("linux/cxt/completions/cxt.bash", "--gpt54")
 forbid("linux/cxt/completions/cxt.zsh", "--gpt54")
+forbid("linux/cxt/completions/cxt.bash", "--mini")
+forbid("linux/cxt/completions/cxt.zsh", "--mini")
+require("linux/cxt/completions/cxt.bash", "--astra")
+require("linux/cxt/completions/cxt.zsh", "--astra")
 
 require(
     "linux/omx-guard/omx-guard.sh",

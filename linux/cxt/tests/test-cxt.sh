@@ -13,6 +13,8 @@ ORIGINAL_PATH="$PATH"
 NO_LOCAL_BIN_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 ZSH_BIN="$(command -v zsh || true)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cxt-test.XXXXXX")"
+# macOS TMPDIR commonly ends in '/'; compare the same physical path as pwd.
+TMP_ROOT="$(cd -P "$TMP_ROOT" && pwd)"
 DEFAULT_CODEX_ARGS=(
   --no-alt-screen
   -c 'tui.keymap.global.open_transcript="ctrl-t"'
@@ -159,7 +161,8 @@ run_direct_case() {
 assert_shortcut_conflict() {
   local category="$1"
   shift
-  local case_root="$TMP_ROOT/conflict-$category"
+  local case_root
+  case_root="$(mktemp -d "$TMP_ROOT/conflict-$category.XXXXXX")"
   local conflict_status
 
   mkdir -p "$case_root/project"
@@ -196,8 +199,10 @@ fi
 "$CXT" --cxt-help > "$TMP_ROOT/cxt-help"
 assert_file_contains "$TMP_ROOT/cxt-help" 'Usage: cxt [CXT_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--sol       --model gpt-5.6-sol'
+assert_file_contains "$TMP_ROOT/cxt-help" '--astra     --model gpt-6-astra'
 assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + on-request approvals'
 ! grep -Fq -- '--gpt54' "$TMP_ROOT/cxt-help" || fail 'retired --gpt54 remains in cxt help'
+! grep -Fq -- '--mini' "$TMP_ROOT/cxt-help" || fail 'retired --mini remains in cxt help'
 assert_file_contains "$TMP_ROOT/cxt-help" '--attach, --at [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-session, --ks [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-all, --ka'
@@ -212,6 +217,9 @@ for effort in low medium high xhigh max ultra; do
   run_direct_case "reasoning-$effort" "--$effort"
   assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c "model_reasoning_effort=\"$effort\""
 done
+
+run_direct_case model-astra --astra
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-6-astra
 
 run_direct_case model-sol --sol
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol
@@ -240,7 +248,22 @@ set -e
 assert_file_contains "$gpt54_root/stderr" 'cxt: --gpt54 is retired because gpt-5.4 is not list-visible'
 [ ! -e "$gpt54_root/codex.args" ] || fail 'retired --gpt54 launched Codex'
 
-run_direct_case model-mini --mini
+mini_root="$TMP_ROOT/retired-mini"
+mkdir -p "$mini_root/project"
+make_minimal_bin "$mini_root/bin"
+make_codex_mock "$mini_root/bin"
+set +e
+(
+  cd "$mini_root/project"
+  PATH="$mini_root/bin" CXT_CODEX_LOG="$mini_root/codex.args" "$CXT" --mini
+) 2> "$mini_root/stderr"
+mini_status=$?
+set -e
+[ "$mini_status" -eq 2 ] || fail "retired --mini returned $mini_status instead of 2"
+assert_file_contains "$mini_root/stderr" 'cxt: --mini is retired because gpt-5.4-mini is not list-visible'
+[ ! -e "$mini_root/codex.args" ] || fail 'retired --mini launched Codex'
+
+run_direct_case native-mini --model gpt-5.4-mini
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4-mini
 
 run_direct_case model-spark --spark
@@ -273,8 +296,8 @@ assert_args "$DIRECT_LOG" \
 run_direct_case prompt --xhigh '현재 프로젝트의 테스트를 수정해줘'
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
 
-run_direct_case passthrough -- --sol --gpt54 --high --auto --madmax --at --ks --ka
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --sol --gpt54 --high --auto --madmax --at --ks --ka
+run_direct_case passthrough -- --astra --sol --gpt54 --mini --high --auto --madmax --at --ks --ka
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --astra --sol --gpt54 --mini --high --auto --madmax --at --ks --ka
 
 run_direct_case native --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
@@ -294,6 +317,7 @@ run_direct_case review review
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" review
 
 assert_shortcut_conflict model --sol --terra
+assert_shortcut_conflict model --astra --sol
 assert_shortcut_conflict reasoning --low --high
 assert_shortcut_conflict permission --safe --auto
 

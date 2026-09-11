@@ -60,11 +60,11 @@ _cxt() {
   esac
 
   cxt_options=(
+    '--astra:use model gpt-6-astra'
     '--sol:use model gpt-5.6-sol'
     '--terra:use model gpt-5.6-terra'
     '--luna:use model gpt-5.6-luna'
     '--gpt55:use model gpt-5.5'
-    '--mini:use model gpt-5.4-mini'
     '--spark:use model gpt-5.3-codex-spark'
     '--low:use low reasoning effort'
     '--medium:use medium reasoning effort'

@@ -72,7 +72,7 @@ _cxt_complete() {
       while IFS= read -r candidate; do
         [ -n "$candidate" ] && COMPREPLY+=("$candidate")
       done < <(compgen -W '
-        --sol --terra --luna --gpt55 --mini --spark
+        --astra --sol --terra --luna --gpt55 --spark
         --low --medium --high --xhigh --max --ultra
         --safe --auto --full-auto --madmax
         --attach --at --kill-session --ks --kill-all --ka

@@ -34,6 +34,7 @@ source ~/.zshrc # zsh
 
 ```bash
 cxt
+cxt --astra --high --auto
 cxt --sol --high --auto
 cxt --terra --medium --safe
 cxt --luna --max --full-auto
@@ -95,14 +96,16 @@ cxt --kill-session=<Tab>
 
 | cxt 옵션 | Codex 변환 |
 | --- | --- |
+| `--astra` | `--model gpt-6-astra` |
 | `--sol` | `--model gpt-5.6-sol` |
 | `--terra` | `--model gpt-5.6-terra` |
 | `--luna` | `--model gpt-5.6-luna` |
 | `--gpt55` | `--model gpt-5.5` |
-| `--mini` | `--model gpt-5.4-mini` |
 | `--spark` | `--model gpt-5.3-codex-spark` |
 
 현재 list-visible 모델 카탈로그에서 빠진 `--gpt54` 별칭은 더 이상 안내하지 않으며, 사용하면 종료 코드 `2`와 마이그레이션 안내를 반환합니다. 계정에서 `gpt-5.4`를 계속 노출한다면 Codex 네이티브 옵션 `--model gpt-5.4`를 직접 사용할 수 있습니다.
+
+`--mini`도 현재 검토한 카탈로그에서 `gpt-5.4-mini`가 list-visible이 아니므로 종료 코드 `2`와 안내를 반환합니다. `--luna`를 사용하거나, 해당 모델이 노출되는 계정에서는 `--model gpt-5.4-mini`를 직접 지정할 수 있습니다. 이는 모델의 전역 서비스 종료를 뜻하지 않습니다.
 
 생각 레벨은 `--low`, `--medium`, `--high`, `--xhigh`, `--max`, `--ultra`를 지원하며 각각 `model_reasoning_effort` 설정으로 변환됩니다. 선택한 모델이 해당 레벨을 지원하지 않으면 Codex가 오류를 반환합니다.
 
@@ -120,7 +123,7 @@ cxt --kill-session=<Tab>
 ```bash
 cxt --sol --xhigh --auto "현재 프로젝트의 테스트를 수정해줘"
 cxt --terra --low --safe review
-cxt --mini --high --full-auto resume --last
+cxt --luna --high --full-auto resume --last
 ```
 
 같은 종류의 편의 옵션을 둘 이상 지정하면 모호한 실행을 막기 위해 종료 코드 `2`로 실패합니다. Codex 네이티브 옵션을 직접 사용할 수도 있습니다.
@@ -153,3 +156,7 @@ cxt --cxt-help
 ```
 
 ShellCheck가 설치되어 있으면 테스트 중 Bash 실행 스크립트와 completion을 자동으로 검사합니다.
+
+macOS처럼 `TMPDIR`가 `/`로 끝나거나 심볼릭 링크를 포함해도 테스트는 물리 경로를
+기준으로 비교합니다. Linux에서도 `TMPDIR=/tmp/ ./linux/cxt/tests/test-cxt.sh`로
+같은 경로 조건을 검증할 수 있습니다(저장소 루트 기준).
