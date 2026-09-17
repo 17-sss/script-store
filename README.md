@@ -251,7 +251,11 @@ pwsh -NoProfile -File .\windows\wsl-portproxy\smoke-test.ps1
 ```
 
 각 스모크 테스트는 임시 디렉터리와 mock 명령을 사용해 실제 사용자 설정을
-변경하지 않도록 구성되어 있습니다. CI는 Linux 전체 suite, macOS의 cxt/OMX
+변경하지 않도록 구성되어 있습니다. GitHub Actions는 수동 실행만 사용하며,
+push나 PR 생성 시 자동 실행하지 않습니다. 워크플로가 기본 브랜치에 반영된 뒤
+Actions → verify → Run workflow에서 실행할 브랜치를 선택할 수 있습니다.
+평소에는 로컬에서 `./tests/audit-smoke.sh --full`로 검사합니다.
+수동 CI는 Linux 전체 suite, macOS의 cxt/OMX
 suite, Windows PowerShell 5.1과 PowerShell 7의 두 mock suite를 별도 job/step으로
 실행합니다. SKIP은 성공 증거로 취급하지 않으며 실제 Windows bind·Ctrl+C·GPO,
 실제 macOS 통합은 별도 검증입니다.
