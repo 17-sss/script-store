@@ -11,7 +11,10 @@ const {spawnSync} = require('child_process');
 const APP_NAME = 'csm';
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_EXACT_RE = new RegExp(`^${UUID_PATTERN}$`, 'i');
-const FILENAME_UUID_RE = new RegExp(`^rollout-.+-(${UUID_PATTERN})\\.jsonl$`, 'i');
+const FILENAME_UUID_RE = new RegExp(
+  `^rollout-.+?-(${UUID_PATTERN})(?:_${UUID_PATTERN})?\\.jsonl$`,
+  'i',
+);
 const PREVIEW_BYTES = 1024 * 1024;
 const WRITER_RELEASE_TIMEOUT_MS = 3000;
 const WRITER_RELEASE_POLL_MS = 100;
@@ -587,7 +590,7 @@ async function recoverWriterSelected(state) {
   }
 
   let entry = checked[0];
-  let diagnosis = diagnoseLocalWriters(entry.file, state.options);
+  let diagnosis = diagnoseLocalWriters(entry, state.options);
   if (!diagnosis.available) {
     await showWriterDiagnostics(state, 'Writer recovery unavailable', diagnosis);
     state.status = `Writer recovery unavailable: ${diagnosis.reason}`;
@@ -599,7 +602,7 @@ async function recoverWriterSelected(state) {
       await showWriterDiagnostics(state, 'Writer recovery found no verified writer', diagnosis);
       state.status = `No verified local writer holds this transcript; ${formatIncompleteCount(diagnosis.incompleteProcesses.length)}`;
     } else {
-      state.status = 'No local writer holds this transcript';
+      state.status = 'No local writer holds this transcript; resume it directly';
     }
     return;
   }
@@ -629,7 +632,7 @@ async function recoverWriterSelected(state) {
   }
   entry = checked[0];
 
-  const recheck = revalidateWriterRecovery(entry, writer, diagnosis.target, state.options);
+  const recheck = revalidateWriterRecovery(entry, writer, diagnosis, state.options);
   if (!recheck.ok) {
     state.status = `Writer recovery blocked: ${recheck.reason}`;
     return;
@@ -642,7 +645,7 @@ async function recoverWriterSelected(state) {
     return;
   }
 
-  const release = await waitForVerifiedWriterRelease(entry, writer, diagnosis.target, state.options);
+  const release = await waitForVerifiedWriterRelease(entry, writer, diagnosis, state.options);
   refresh(state);
   if (release.ok) {
     const incomplete = release.diagnosis.incompleteProcesses.length;
@@ -670,7 +673,8 @@ function writerRecoveryConfirmationPrompt(entry, writer, diagnosis, expected) {
     `${strong('Process name:')} ${sanitizeTerminalText(writer.name) || '(unknown)'}`,
     `${strong('Executable:')} ${sanitizeTerminalText(writer.executable) || '(unavailable)'}`,
     `${strong('Command:')} ${sanitizeTerminalText(writer.command) || '(unavailable)'}`,
-    `${strong('Other Codex transcripts held:')} ${writer.otherTranscriptCount}`,
+    `${strong('Writer target:')} ${writerTargetLabel(diagnosis.target)}`,
+    `${strong('Other Codex sessions held:')} ${writer.otherTranscriptCount}`,
     ...incompleteLines,
     '',
     danger('This process may interrupt other Codex sessions.'),
@@ -685,15 +689,15 @@ async function showWriterDiagnostics(state, heading, diagnosis) {
   const lines = [
     danger(heading),
     diagnosis.available
-      ? `${strong('Target dev/inode:')} ${diagnosis.target.dev}/${diagnosis.target.ino}`
+      ? `${strong(`Target ${writerTargetLabel(diagnosis.target)} dev/inode:`)} ${diagnosis.target.dev}/${diagnosis.target.ino}`
       : `${strong('Reason:')} ${sanitizeTerminalText(diagnosis.reason)}`,
   ];
 
   if (diagnosis.available) {
     if (diagnosis.holders.length === 0) {
       lines.push(diagnosis.incompleteProcesses.length === 0
-        ? 'No local writer holds this transcript.'
-        : 'No verified local writer holds this transcript.');
+        ? 'No local writer holds this transcript. Resume it directly.'
+        : 'No verified local writer holds this transcript. Try resume directly; no SIGTERM was sent.');
     } else {
       lines.push('', strong('Local same-user file holders:'));
       for (const holder of diagnosis.holders) {
@@ -733,23 +737,41 @@ function formatWriterHolder(holder) {
     `  name: ${sanitizeTerminalText(holder.name) || '(unknown)'}`,
     `  executable: ${sanitizeTerminalText(holder.executable) || '(unavailable)'}`,
     `  command: ${sanitizeTerminalText(holder.command) || '(unavailable)'}`,
-    `  other Codex transcripts held: ${holder.otherTranscriptCount}`,
+    `  other Codex sessions held: ${holder.otherTranscriptCount}`,
   ];
 }
 
-function revalidateWriterRecovery(entry, writer, originalTarget, options) {
+function writerTargetLabel(target) {
+  return target && target.kind === 'writer-lock' ? 'writer lock' : 'transcript';
+}
+
+function revalidateWriterRecovery(entry, writer, originalDiagnosis, options) {
   const fresh = readEntry(entry.file, 'active');
   const mutationReason = mutationBlockReason(entry, fresh, options);
   if (mutationReason) {
     return {ok: false, reason: mutationReason};
   }
 
-  const target = fileIdentity(entry.file);
-  if (!target.ok) {
-    return {ok: false, reason: `target transcript could not be statted: ${target.reason}`};
+  const transcriptTarget = fileIdentity(entry.file);
+  if (!transcriptTarget.ok) {
+    return {ok: false, reason: `target transcript could not be statted: ${transcriptTarget.reason}`};
   }
-  if (!sameFileIdentity(target, originalTarget)) {
-    return {ok: false, reason: 'target dev/inode changed before SIGTERM'};
+  if (!sameFileIdentity(transcriptTarget, originalDiagnosis.transcriptTarget)) {
+    return {
+      ok: false,
+      reason: originalDiagnosis.target.kind === 'transcript'
+        ? 'target dev/inode changed before SIGTERM'
+        : 'target transcript dev/inode changed before SIGTERM',
+    };
+  }
+
+  const resolved = resolveWriterTarget(entry, options);
+  if (!resolved.ok) {
+    return {ok: false, reason: resolved.reason};
+  }
+  const target = resolved.target;
+  if (target.kind !== originalDiagnosis.target.kind || !sameFileIdentity(target, originalDiagnosis.target)) {
+    return {ok: false, reason: `target ${writerTargetLabel(originalDiagnosis.target)} dev/inode changed before SIGTERM`};
   }
 
   const current = inspectProcessForTarget(writer.pid, target, options);
@@ -763,15 +785,22 @@ function revalidateWriterRecovery(entry, writer, originalTarget, options) {
     return {ok: false, reason: `PID ${writer.pid} start identity changed before SIGTERM`};
   }
   if (!current.holdsTarget) {
-    return {ok: false, reason: `PID ${writer.pid} no longer holds the target transcript`};
+    return {ok: false, reason: `PID ${writer.pid} no longer holds the target ${writerTargetLabel(target)}`};
   }
   if (!current.codexRelated) {
     return {ok: false, reason: `PID ${writer.pid} is no longer identified as a Codex process`};
   }
 
-  const diagnosis = diagnoseLocalWriters(entry.file, options);
+  const diagnosis = diagnoseLocalWriters(entry, options);
   if (!diagnosis.available) {
     return {ok: false, reason: `writer candidates could not be rechecked before SIGTERM: ${diagnosis.reason}`};
+  }
+  if (
+    diagnosis.target.kind !== originalDiagnosis.target.kind ||
+    !sameFileIdentity(diagnosis.target, originalDiagnosis.target) ||
+    !sameFileIdentity(diagnosis.transcriptTarget, originalDiagnosis.transcriptTarget)
+  ) {
+    return {ok: false, reason: 'writer target identity changed during SIGTERM revalidation'};
   }
   const codexWriters = diagnosis.holders.filter((holder) => holder.codexRelated);
   const unrecognizedHolders = diagnosis.holders.filter((holder) => !holder.codexRelated);
@@ -788,18 +817,18 @@ function revalidateWriterRecovery(entry, writer, originalTarget, options) {
   return {ok: true};
 }
 
-async function waitForVerifiedWriterRelease(entry, writer, originalTarget, options) {
+async function waitForVerifiedWriterRelease(entry, writer, originalDiagnosis, options) {
   const deadline = Date.now() + WRITER_RELEASE_TIMEOUT_MS;
   while (true) {
-    const target = fileIdentity(entry.file);
-    if (!target.ok) {
-      return {ok: false, reason: `target transcript could not be statted after SIGTERM: ${target.reason}`};
+    const transcriptTarget = fileIdentity(entry.file);
+    if (!transcriptTarget.ok) {
+      return {ok: false, reason: `target transcript could not be statted after SIGTERM: ${transcriptTarget.reason}`};
     }
-    if (!sameFileIdentity(target, originalTarget)) {
-      return {ok: false, reason: 'target dev/inode changed after SIGTERM'};
+    if (!sameFileIdentity(transcriptTarget, originalDiagnosis.transcriptTarget)) {
+      return {ok: false, reason: 'target transcript dev/inode changed after SIGTERM'};
     }
 
-    const current = inspectProcessForTarget(writer.pid, target, options);
+    const current = inspectProcessForTarget(writer.pid, originalDiagnosis.target, options);
     if (!current.available) {
       return {ok: false, reason: `PID ${writer.pid} release could not be verified: ${current.reason}`};
     }
@@ -820,7 +849,7 @@ async function waitForVerifiedWriterRelease(entry, writer, originalTarget, optio
 
   let diagnosis;
   for (let check = 0; check < WRITER_RELEASE_STABILITY_CHECKS; check += 1) {
-    diagnosis = diagnoseLocalWriters(entry.file, options);
+    diagnosis = diagnoseLocalWriters(entry, options);
     if (!diagnosis.available) {
       return {ok: false, reason: `PID ${writer.pid} released the transcript, but writer reacquisition could not be checked: ${diagnosis.reason}`};
     }
@@ -1616,11 +1645,12 @@ function mutationPathBlockReason(entry, options) {
   return '';
 }
 
-function diagnoseLocalWriters(file, options) {
-  const target = fileIdentity(file);
-  if (!target.ok) {
-    return unavailableWriterDiagnosis(`target transcript could not be statted: ${target.reason}`);
+function diagnoseLocalWriters(entry, options) {
+  const resolved = resolveWriterTarget(entry, options);
+  if (!resolved.ok) {
+    return unavailableWriterDiagnosis(resolved.reason);
   }
+  const {target, transcriptTarget} = resolved;
   if (process.platform !== 'linux') {
     return unavailableWriterDiagnosis('local writer discovery requires Linux /proc');
   }
@@ -1633,6 +1663,13 @@ function diagnoseLocalWriters(file, options) {
     processEntries = fs.readdirSync('/proc', {withFileTypes: true});
   } catch (error) {
     return unavailableWriterDiagnosis(`/proc could not be read: ${error.message}`);
+  }
+
+  const lockOwnership = target.kind === 'writer-lock'
+    ? readKernelWriterLockOwners(target)
+    : {ok: true, owners: null};
+  if (!lockOwnership.ok) {
+    return unavailableWriterDiagnosis(lockOwnership.reason);
   }
 
   const holders = [];
@@ -1650,12 +1687,132 @@ function diagnoseLocalWriters(file, options) {
       incompleteProcesses.push(inspected);
       continue;
     }
-    if (inspected.exists && inspected.holdsTarget) {
+    if (
+      inspected.exists && inspected.holdsTarget &&
+      (!lockOwnership.owners || lockOwnership.owners.has(inspected.pid))
+    ) {
       holders.push(inspected);
     }
   }
 
-  return {available: true, reason: '', target, holders, incompleteProcesses};
+  if (lockOwnership.owners) {
+    const finalLockOwnership = readKernelWriterLockOwners(target);
+    if (!finalLockOwnership.ok) {
+      return unavailableWriterDiagnosis(finalLockOwnership.reason, incompleteProcesses);
+    }
+    if (!samePidSet(lockOwnership.owners, finalLockOwnership.owners)) {
+      return unavailableWriterDiagnosis('writer lock ownership changed during diagnosis; retry', incompleteProcesses);
+    }
+
+    const verifiedPids = new Set(holders.map((holder) => holder.pid));
+    const unresolvedOwners = [...lockOwnership.owners].filter((pid) => !verifiedPids.has(pid));
+    if (unresolvedOwners.length > 0) {
+      return unavailableWriterDiagnosis(
+        `writer lock owner PID ${unresolvedOwners.join(', ')} could not be verified`,
+        incompleteProcesses,
+      );
+    }
+  }
+
+  return {available: true, reason: '', target, transcriptTarget, holders, incompleteProcesses};
+}
+
+function samePidSet(left, right) {
+  return left.size === right.size && [...left].every((pid) => right.has(pid));
+}
+
+function readKernelWriterLockOwners(target) {
+  let contents;
+  try {
+    contents = fs.readFileSync('/proc/locks', 'utf8');
+  } catch (error) {
+    return {ok: false, reason: `/proc/locks could not be read: ${sanitizeTerminalText(error.message)}`};
+  }
+
+  const device = linuxDeviceNumbers(target.dev);
+  if (!device.ok) {
+    return {ok: false, reason: device.reason};
+  }
+
+  const owners = new Set();
+  for (const line of contents.split('\n')) {
+    const match = line.match(
+      /^\d+:\s+(FLOCK|POSIX|OFDLCK)\s+ADVISORY\s+WRITE\s+(-?\d+)\s+([0-9a-f]+):([0-9a-f]+):(\d+)\s+0\s+EOF$/i,
+    );
+    if (!match) {
+      continue;
+    }
+
+    const [, , pidText, majorText, minorText, inodeText] = match;
+    if (
+      BigInt(`0x${majorText}`) !== device.major ||
+      BigInt(`0x${minorText}`) !== device.minor ||
+      inodeText !== target.ino
+    ) {
+      continue;
+    }
+    if (!/^\d+$/.test(pidText)) {
+      return {ok: false, reason: 'writer lock owner PID is unavailable'};
+    }
+    owners.add(Number(pidText));
+  }
+
+  return {ok: true, owners};
+}
+
+function linuxDeviceNumbers(value) {
+  try {
+    const device = BigInt(value);
+    return {
+      ok: true,
+      major: ((device & 0xfff00n) >> 8n) | ((device & 0xfffff00000000000n) >> 32n),
+      minor: (device & 0xffn) | ((device & 0xffffff00000n) >> 12n),
+    };
+  } catch (error) {
+    return {ok: false, reason: `writer target device number is invalid: ${sanitizeTerminalText(error.message)}`};
+  }
+}
+
+function resolveWriterTarget(entry, options) {
+  const transcriptTarget = fileIdentity(entry.file);
+  if (!transcriptTarget.ok) {
+    return {ok: false, reason: `target transcript could not be statted: ${transcriptTarget.reason}`};
+  }
+
+  if (!UUID_EXACT_RE.test(entry.canonicalId || '')) {
+    return {ok: false, reason: 'session UUID is unavailable for writer lock discovery'};
+  }
+
+  const lockPath = path.join(options.codexHome, 'thread-writer-locks', `${entry.canonicalId}.lock`);
+  let lockStat;
+  try {
+    lockStat = fs.lstatSync(lockPath);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return {
+        ok: true,
+        target: {...transcriptTarget, kind: 'transcript', path: entry.file},
+        transcriptTarget,
+      };
+    }
+    return {ok: false, reason: `writer lock could not be inspected: ${sanitizeTerminalText(error.message)}`};
+  }
+
+  if (lockStat.isSymbolicLink() || !lockStat.isFile()) {
+    return {ok: false, reason: 'writer lock is not a regular non-symlink file'};
+  }
+
+  return {
+    ok: true,
+    target: {
+      ok: true,
+      dev: String(lockStat.dev),
+      ino: String(lockStat.ino),
+      kind: 'writer-lock',
+      path: lockPath,
+    },
+    transcriptTarget,
+  };
 }
 
 function unavailableWriterDiagnosis(reason, incompleteProcesses = []) {
@@ -1663,6 +1820,7 @@ function unavailableWriterDiagnosis(reason, incompleteProcesses = []) {
     available: false,
     reason: sanitizeTerminalText(reason) || 'writer diagnostics are unavailable',
     target: null,
+    transcriptTarget: null,
     holders: [],
     incompleteProcesses,
   };
@@ -1858,7 +2016,7 @@ function inspectProcessDescriptors(pid, target, options) {
   }
 
   let holdsTarget = false;
-  const otherTranscripts = new Set();
+  const otherSessions = new Set();
   for (const descriptor of descriptors) {
     if (!/^\d+$/.test(descriptor.name)) {
       continue;
@@ -1890,12 +2048,12 @@ function inspectProcessDescriptors(pid, target, options) {
       }
       return {ok: false, reason: `could not read ${descriptorPath}: ${error.message}`};
     }
-    if (isCodexTranscriptPath(linkedFile, options)) {
-      otherTranscripts.add(`${identity.dev}:${identity.ino}`);
+    if (isCodexTranscriptPath(linkedFile, options) || isCodexWriterLockPath(linkedFile, options)) {
+      otherSessions.add(`${identity.dev}:${identity.ino}`);
     }
   }
 
-  return {ok: true, holdsTarget, otherTranscriptCount: otherTranscripts.size};
+  return {ok: true, holdsTarget, otherTranscriptCount: otherSessions.size};
 }
 
 function isCodexTranscriptPath(value, options) {
@@ -1904,6 +2062,13 @@ function isCodexTranscriptPath(value, options) {
     isUnderPath(linkedFile, sessionsDir(options)) ||
     isUnderPath(linkedFile, archivedDir(options))
   );
+}
+
+function isCodexWriterLockPath(value, options) {
+  const linkedFile = String(value || '').replace(/ \(deleted\)$/, '');
+  const lockRoot = path.join(options.codexHome, 'thread-writer-locks');
+  return path.dirname(linkedFile) === lockRoot &&
+    new RegExp(`^${UUID_PATTERN}\\.lock$`, 'i').test(path.basename(linkedFile));
 }
 
 function readProcessText(pid) {

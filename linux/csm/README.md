@@ -114,14 +114,14 @@ unsafe 항목도 목록에는 표시됩니다. TUI 상세 영역과 list 출력�
 
 `x`는 active 세션 한 개에만 사용할 수 있습니다. archived 세션과 다중 선택은 즉시 차단하며 어떤 프로세스도 종료하지 않습니다. 이 기능은 transcript를 archive, unarchive, 이동, 격리, 삭제하지 않습니다.
 
-Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키지는 사용하지 않습니다.
+Linux에서만 `/proc/<pid>/fd`와 `/proc/locks`를 직접 검사합니다. `lsof`나 새 런타임 패키지는 사용하지 않습니다. 최신 Codex에서는 `$CODEX_HOME/thread-writer-locks/<task UUID>.lock`을 writer 판별 대상으로 우선 사용하고, 해당 lock 파일이 없는 구버전 세션만 transcript FD 방식으로 확인합니다. Desktop/app-server가 JSONL을 계속 열어 두지 않아도 같은 task의 writer를 찾을 수 있습니다.
 
 - 실행 직전에 기존 변경 작업과 같은 안전 gate를 적용합니다. filename UUID와 첫 번째 `session_meta.payload.id`가 일치하고, 정확한 active sessions root 아래 JSONL이어야 합니다.
-- 대상 파일의 fresh `dev`/`ino`와 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. FD보다 먼저 process start identity, name/command, `/proc/<pid>/exe`의 실제 실행 파일을 읽고 Codex 후보인지 분류합니다. argv[0]만 `codex`로 바꾼 Node 같은 프로세스는 Codex 후보로 인정하지 않습니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다.
+- paginated rollout 파일명은 `<task UUID>_<segment UUID>.jsonl`에서 앞의 task UUID를 사용합니다. 대상 transcript와 writer lock의 fresh `dev`/`ino`를 확인하고, 같은 UID의 각 프로세스 FD `dev`/`ino`를 비교합니다. writer lock은 파일을 열기만 한 프로세스를 소유자로 보지 않고 `/proc/locks`의 같은 device/inode에 등록된 배타적 advisory lock PID까지 일치해야 합니다. FD보다 먼저 process start identity, name/command, `/proc/<pid>/exe`의 실제 실행 파일을 읽고 Codex 후보인지 분류합니다. argv[0]만 `codex`로 바꾼 Node 같은 프로세스는 Codex 후보로 인정하지 않습니다. `/proc/<pid>/stat`에서 zombie(`Z`)로 확인된 프로세스는 열린 FD를 유지할 수 없으므로 검사 대상에서 제외합니다.
 - Codex 후보의 FD를 완전히 읽을 수 없으면 진단 불가로 표시하고 어떤 프로세스도 종료하지 않습니다. name/command가 안정적으로 비-Codex로 확인된 프로세스의 FD만 권한 때문에 읽을 수 없으면 PID, name/command, 실패 원인을 경고로 표시하되 검증된 Codex writer 탐색은 계속합니다. 따라서 전체 로컬 holder 부재를 증명하지는 않으며, 읽을 수 있는 비-Codex 프로세스가 실제 target `dev`/`ino`를 잡고 있으면 기존처럼 종료를 차단합니다.
 - `(sd-pam)`처럼 name/command는 읽히지만 `/proc/<pid>/exe` 접근이 거부되는 비-Codex 프로세스도 불완전한 진단으로 경고하고 탐색을 계속합니다. 이름이나 argv[0]이 Codex 후보이거나 비어 있으면 이 예외를 적용하지 않습니다. 실행 파일을 확인하지 못한 프로세스는 종료 후보로 인정하지 않으며, 읽을 수 있는 FD가 대상 transcript를 잡고 있다면 종료를 차단합니다.
-- PID, process name/command, 그 프로세스가 함께 열고 있는 다른 Codex transcript 수를 terminal-control sanitization 후 보여 줍니다.
-- 완전히 검사한 결과 local writer가 없으면 `No local writer holds this transcript`만 안내하고 아무 작업도 하지 않습니다. 일부 non-Codex 프로세스의 FD를 검사하지 못했다면 `No verified local writer holds this transcript`와 경고를 함께 표시합니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
+- PID, process name/command, 선택한 판별 대상이 writer lock인지 transcript인지, 그 프로세스가 함께 열고 있는 다른 Codex session 수를 terminal-control sanitization 후 보여 줍니다.
+- 완전히 검사한 결과 local writer가 없으면 `No local writer holds this transcript; resume it directly`를 안내하고 아무 작업도 하지 않습니다. 이는 PC 쪽 writer가 이미 끊긴 상태이므로 폰 SSH의 CLI에서 바로 resume하면 된다는 뜻입니다. 일부 non-Codex 프로세스의 FD를 검사하지 못했다면 `No verified local writer holds this transcript`와 함께 먼저 resume해 보라는 안내와 경고를 표시합니다. Codex 프로세스로 신뢰성 있게 식별되지 않는 holder는 진단만 보여 주며 terminate writer를 차단합니다.
 
 종료는 정확히 하나의 Codex writer 후보일 때만 가능합니다. 확인 화면은 다른 Codex 세션도 끊길 수 있음을 경고하고, 아래처럼 full UUID와 PID를 모두 포함한 정확한 입력을 요구합니다.
 
@@ -129,7 +129,9 @@ Linux에서만 `/proc/<pid>/fd`를 직접 검사합니다. `lsof`나 새 패키�
 TERMINATE WRITER 019efcef-19e5-7a83-821a-1b3ec9e1716d 12345
 ```
 
-확인 직후에도 transcript identity, target `dev`/`ino`, PID의 UID와 process start identity, 해당 PID의 target FD 점유를 모두 다시 확인합니다. 통과한 정확한 PID 하나에만 `SIGTERM`을 보내며 process group, parent/child tree, `pkill`, `SIGKILL`, sudo는 사용하지 않습니다. 최대 약 3초 동안 해당 PID의 target FD 해제를 polling하고, 짧은 안정화 구간 동안 새 Codex PID가 같은 transcript를 다시 잡지 않았는지도 검사합니다. 검증한 PID가 해제하면 성공으로 표시하고, 계속 보유하거나 다른 Codex PID가 재점유하면 미해제 상태를 명확히 표시합니다. `x`는 writer recovery만 수행하며 자동으로 `codex resume`을 실행하지 않습니다.
+확인 직후에도 transcript identity, writer target `dev`/`ino`, PID의 UID와 process start identity, 해당 PID의 target FD 점유를 모두 다시 확인합니다. 통과한 정확한 PID 하나에만 `SIGTERM`을 보내며 process group, parent/child tree, `pkill`, `SIGKILL`, sudo는 사용하지 않습니다. 최대 약 3초 동안 해당 PID의 target FD 해제를 polling하고, 짧은 안정화 구간 동안 새 Codex PID가 같은 task의 lock 또는 transcript를 다시 잡지 않았는지도 검사합니다. 검증한 PID가 해제하면 성공으로 표시하고, 계속 보유하거나 다른 Codex PID가 재점유하면 미해제 상태를 명확히 표시합니다. `x`는 writer recovery만 수행하며 자동으로 `codex resume`을 실행하지 않습니다.
+
+Desktop의 app-server 한 프로세스가 여러 task lock을 함께 보유할 수 있습니다. 확인 화면의 `Other Codex sessions held`가 0보다 크면 해당 PID 종료로 다른 task도 잠시 끊길 수 있으므로 표시된 수를 확인해야 합니다.
 
 ## 격리와 영구 삭제
 
@@ -220,7 +222,7 @@ ${CODEX_SQLITE_HOME:-$CODEX_HOME}/state_5.sqlite
 $XDG_DATA_HOME/csm/quarantine/*/manifest.json
 ```
 
-`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. `threads.name`을 우선 사용하고, 비어 있거나 컬럼이 없으면 초기 prompt와 다른 `threads.title`을 사용합니다. Codex가 별도 `CODEX_SQLITE_HOME`을 사용하면 CSM도 그 경로를 우선합니다. 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 초기 prompt로 계속 표시하되, plain/JSON 목록은 stderr에 경고하고 TUI는 상태줄에 실패 원인을 표시합니다. CSM은 SQLite를 변경하거나 migration하지 않으며, paginated remote history나 daemon 내부 상태 대신 위 로컬 transcript와 현재 `threads` metadata만 지원합니다.
+`state_5.sqlite`은 rename한 세션 이름을 읽을 때만 사용합니다. `threads.name`을 우선 사용하고, 비어 있거나 컬럼이 없으면 초기 prompt와 다른 `threads.title`을 사용합니다. Codex가 별도 `CODEX_SQLITE_HOME`을 사용하면 CSM도 그 경로를 우선합니다. 파일을 읽을 수 없거나 현재 Node.js가 SQLite 읽기를 지원하지 않으면 목록은 초기 prompt로 계속 표시하되, plain/JSON 목록은 stderr에 경고하고 TUI는 상태줄에 실패 원인을 표시합니다. CSM은 SQLite를 변경하거나 migration하지 않습니다. paginated local rollout 파일은 원래 task UUID로 resume/writer recovery할 수 있지만 목록과 파일 변경 작업은 계속 각 transcript segment 단위입니다. daemon 내부 상태는 직접 변경하지 않습니다.
 
 기본 `CODEX_HOME`은 `~/.codex`입니다.
 
@@ -239,7 +241,7 @@ codex unarchive <SESSION_UUID>
 ./smoke-test.sh
 ```
 
-테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL/SQLite fixture를 만들고, `HOME`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. resume/archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 선택 home 전달과 resume 직전 identity 변경 차단도 확인합니다. writer 검증은 임시 Codex 이름의 실행 파일과 argv[0]만 위장한 Node를 구분하며, 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다. 이동 검증은 same-filesystem, 강제 EXDEV, 복사 실패, 원본 제거 실패, rollback 대상 충돌을 주입해 외부 파일의 bytes와 inode 및 transcript 복구본 보존을 확인합니다.
+테스트는 `mktemp -d`로 만든 격리 디렉터리 안에서만 합성 JSONL/SQLite fixture를 만들고, `HOME`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `XDG_*` 경로를 모두 임시 위치로 바꿉니다. resume/archive/unarchive 검증은 실제 `codex`가 아니라 `PATH` 앞에 둔 fake `codex` 바이너리로만 수행하고, 선택 home 전달과 resume 직전 identity 변경 차단도 확인합니다. writer 검증은 임시 Codex 이름의 실행 파일과 argv[0]만 위장한 Node를 구분합니다. Desktop형 paginated filename과 thread-writer lock fixture에서는 실제 advisory lock 소유자와 lock 파일만 연 Codex 프로세스를 동시에 두고 소유자 PID만 종료하는지도 확인합니다. 격리/복원/영구 삭제도 임시 fixture만 대상으로 확인합니다. 이동 검증은 same-filesystem, 강제 EXDEV, 복사 실패, 원본 제거 실패, rollback 대상 충돌을 주입해 외부 파일의 bytes와 inode 및 transcript 복구본 보존을 확인합니다.
 
 설치 테스트 역시 임시 HOME만 사용하며 실제 `~/.local/bin`, `.bashrc`, `.zshrc`를 변경하지 않습니다.
 

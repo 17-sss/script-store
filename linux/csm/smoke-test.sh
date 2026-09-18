@@ -26,6 +26,7 @@ TEST_BIN="$TMP_DIR/bin"
 FAKE_CODEX_LOG="$TMP_DIR/fake-codex.log"
 FAKE_CODEX_HOME_LOG="$TMP_DIR/fake-codex-home.log"
 FAKE_WRITER_RUNTIME="$TMP_DIR/codex-fixture"
+FAKE_LOCK_WRITER_RUNTIME="$TMP_DIR/codex-lock-fixture"
 QUARANTINE_ROOT="$TMP_DIR/xdg-data/csm/quarantine"
 PATH_WITH_FAKE="$TEST_BIN:$PATH"
 PROJECT_CWD="/tmp/csm-project"
@@ -80,6 +81,7 @@ trap safe_cleanup EXIT
 
 mkdir -p "$TEST_HOME" "$TEST_CODEX_HOME/sessions/2026/07/20" \
   "$TEST_CODEX_HOME/archived_sessions/2026/07/20" \
+  "$TEST_CODEX_HOME/thread-writer-locks" \
   "$TMP_DIR/xdg-config" "$TMP_DIR/xdg-data" "$TMP_DIR/xdg-state" "$TMP_DIR/xdg-cache" \
   "$TEST_BIN"
 : > "$FAKE_CODEX_LOG"
@@ -89,6 +91,13 @@ if ! ln "$NODE_BIN" "$FAKE_WRITER_RUNTIME" 2>/dev/null; then
   cp -- "$NODE_BIN" "$FAKE_WRITER_RUNTIME"
 fi
 chmod +x "$FAKE_WRITER_RUNTIME"
+FLOCK_BIN="$(command -v flock || true)"
+if [[ -z "$FLOCK_BIN" ]]; then
+  printf 'flock command is required for writer-lock ownership tests\n' >&2
+  exit 1
+fi
+cp -- "$FLOCK_BIN" "$FAKE_LOCK_WRITER_RUNTIME"
+chmod +x "$FAKE_LOCK_WRITER_RUNTIME"
 
 cat > "$TEST_BIN/codex" <<'FAKE_CODEX'
 #!/usr/bin/env bash
@@ -319,7 +328,19 @@ const path = require('path');
 
 const originalReaddirSync = fs.readdirSync.bind(fs);
 const originalStatSync = fs.statSync.bind(fs);
+const originalReadFileSync = fs.readFileSync.bind(fs);
 const originalReadlinkSync = fs.readlinkSync.bind(fs);
+fs.readFileSync = function readFileSyncWithProcDenial(file, options) {
+  if (
+    process.env.CSM_TEST_DENY_PROC_LOCKS === '1' &&
+    typeof file === 'string' && path.resolve(file) === '/proc/locks'
+  ) {
+    const error = new Error("EACCES: permission denied, open '/proc/locks'");
+    error.code = 'EACCES';
+    throw error;
+  }
+  return originalReadFileSync(file, options);
+};
 fs.readlinkSync = function readlinkSyncWithProcDenial(file, options) {
   const denied = process.env.CSM_TEST_DENY_PROC_EXE;
   if (denied && path.resolve(file) === path.resolve(denied)) {
@@ -463,6 +484,8 @@ uuid_bl="019f1000-0000-7000-8000-000000000064"
 uuid_bm="019f1000-0000-7000-8000-000000000065"
 uuid_bn="019f1000-0000-7000-8000-000000000066"
 uuid_bo="019f1000-0000-7000-8000-000000000067"
+uuid_bp="019f1000-0000-7000-8000-000000000068"
+uuid_bq="019f1000-0000-7000-8000-000000000069"
 
 write_session() {
   local area="$1"
@@ -473,6 +496,19 @@ write_session() {
   local file="$TEST_CODEX_HOME/$area/2026/07/20/rollout-${timestamp//:/-}-$file_id.jsonl"
   cat > "$file" <<JSONL
 {"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$meta_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex CLI","source":"cli","thread_source":"user"}}
+{"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
+JSONL
+  printf '%s\n' "$file"
+}
+
+write_paginated_session() {
+  local thread_id="$1"
+  local segment_id="$2"
+  local timestamp="$3"
+  local prompt="$4"
+  local file="$TEST_CODEX_HOME/sessions/2026/07/20/rollout-${timestamp//:/-}-${thread_id}_${segment_id}.jsonl"
+  cat > "$file" <<JSONL
+{"timestamp":"$timestamp.000Z","type":"session_meta","payload":{"id":"$thread_id","timestamp":"$timestamp.000Z","cwd":"$PROJECT_CWD","originator":"Codex Desktop","source":"vscode","thread_source":"user"}}
 {"timestamp":"$timestamp.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"$prompt"}]}}
 JSONL
   printf '%s\n' "$file"
@@ -708,6 +744,34 @@ start_fake_writer() {
     sleep 0.02
   done
   fail "fake writer did not become ready: $WRITER_PID"
+}
+
+start_fake_lock_writer() {
+  local file="$1"
+  local writer_tag="${RANDOM}-${RANDOM}"
+  local ready_file="$TMP_DIR/lock-writer-$writer_tag.ready"
+
+  "$FAKE_LOCK_WRITER_RUNTIME" --exclusive --close "$file" \
+    sh -c '
+      parent_pid="$PPID"
+      printf "%s\n" "$$" > "$1"
+      while kill -0 "$parent_pid" 2>/dev/null; do
+        sleep 0.02
+      done
+    ' sh "$ready_file" &
+  LOCK_WRITER_PID=$!
+  WRITER_PIDS+=("$LOCK_WRITER_PID")
+
+  local attempt
+  for attempt in {1..100}; do
+    if [[ -s "$ready_file" ]] && kill -0 "$LOCK_WRITER_PID" 2>/dev/null; then
+      IFS= read -r LOCK_WRITER_CHILD_PID < "$ready_file"
+      AUXILIARY_PIDS+=("$LOCK_WRITER_CHILD_PID")
+      return
+    fi
+    sleep 0.02
+  done
+  fail "fake lock writer did not become ready: $LOCK_WRITER_PID"
 }
 
 start_fake_reacquirer() {
@@ -995,6 +1059,7 @@ printf '{bad json\n' >> "$case_f_file"
 write_session sessions "${uuid_j^^}" "$uuid_j" "2026-07-20T00:00:07" "case K uppercase filename id" >/dev/null
 terminal_control_file="$(write_session_with_terminal_controls "$uuid_u" "2026-07-20T00:00:08")"
 write_non_rollout_filename "$uuid_aa" "2026-07-20T00:00:09" "case N non rollout filename"
+paginated_writer_file="$(write_paginated_session "$uuid_bp" "$uuid_bq" "2026-07-20T00:00:10" "case Desktop paginated writer lock")"
 write_thread_title "$uuid_a" "case A renamed title" "case A later parent metadata"
 write_thread_title "$uuid_c" "case B subagent parent metadata" "case B subagent parent metadata"
 
@@ -1013,6 +1078,7 @@ assert_json_entry "$json_output" "case B subagent parent metadata" "entry.id ===
 assert_json_entry "$json_output" "case B subagent parent metadata" "entry.title === ''"
 assert_json_entry "$json_output" "case C mismatched ids" "entry.mutationSafe === false && /mismatch/i.test(entry.unsafeReason || '')"
 assert_json_entry "$json_output" "case D missing filename uuid" "entry.mutationSafe === false && /filename/i.test(entry.unsafeReason || '')"
+assert_json_entry "$json_output" "case Desktop paginated writer lock" "entry.id === '$uuid_bp' && entry.mutationSafe === true"
 assert_json_entry "$json_output" "case E missing payload id" "entry.mutationSafe === false && /session_meta/i.test(entry.unsafeReason || '')"
 assert_json_entry "$json_output" "case F malformed later line" "entry.id === '$uuid_i' && entry.mutationSafe === true"
 assert_json_entry "$json_output" "case K uppercase filename id" "entry.id === '$uuid_j' && entry.mutationSafe === true"
@@ -1227,6 +1293,51 @@ assert_contains "$(cat "$writer_success_signal_log")" 'SIGTERM'
   fail 'writer recovery modified the transcript content'
 stop_auxiliary_process "$LIVE_PROCESS_PID"
 stop_auxiliary_process "$ZOMBIE_PARENT_PID"
+
+# Current Desktop/app-server writers keep the task's thread-writer lock open
+# while transcript JSONL files may be opened only briefly. Recovery must use
+# the primary thread UUID from a paginated rollout filename and signal the
+# verified lock holder even when it does not hold the transcript.
+desktop_writer_lock="$TEST_CODEX_HOME/thread-writer-locks/$uuid_bp.lock"
+: > "$desktop_writer_lock"
+paginated_writer_digest="$(sha256sum "$paginated_writer_file")"
+start_fake_writer "$desktop_writer_lock" codex
+desktop_nonowner_pid="$WRITER_PID"
+desktop_nonowner_signal_log="$WRITER_SIGNAL_LOG"
+start_fake_lock_writer "$desktop_writer_lock"
+desktop_writer_pid="$LOCK_WRITER_PID"
+run_tui "/case Desktop paginated writer lock\nxTERMINATE WRITER $uuid_bp $desktop_writer_pid\nq" \
+  "$TMP_DIR/desktop-writer-lock.log" "" "" "" "" 'Writer recovery succeeded'
+if wait "$desktop_writer_pid"; then
+  desktop_writer_status=0
+else
+  desktop_writer_status=$?
+fi
+[[ "$desktop_writer_status" -eq 143 ]] || \
+  fail "fake lock writer exited with unexpected status: $desktop_writer_status"
+forget_fake_writer "$desktop_writer_pid"
+desktop_writer_log="$(clean_log "$TMP_DIR/desktop-writer-lock.log")"
+assert_contains "$desktop_writer_log" "Writer target: writer lock"
+assert_contains "$desktop_writer_log" "Writer recovery succeeded"
+assert_writer_alive_without_sigterm "$desktop_nonowner_pid" "$desktop_nonowner_signal_log"
+[[ "$(sha256sum "$paginated_writer_file")" == "$paginated_writer_digest" ]] || \
+  fail 'writer lock recovery modified the paginated transcript content'
+stop_fake_writer "$desktop_nonowner_pid"
+
+# If kernel lock ownership cannot be read, an open writer-lock FD alone must
+# never authorize SIGTERM.
+start_fake_lock_writer "$desktop_writer_lock"
+desktop_unreadable_lock_pid="$LOCK_WRITER_PID"
+(
+  export NODE_OPTIONS="--require=$TMP_DIR/proc-fd-deny.js"
+  export CSM_TEST_DENY_PROC_LOCKS=1
+  run_tui "/case Desktop paginated writer lock\nx\nq" "$TMP_DIR/desktop-lock-unreadable.log"
+)
+kill -0 "$desktop_unreadable_lock_pid" 2>/dev/null || \
+  fail 'unreadable /proc/locks diagnosis terminated the lock owner'
+assert_contains "$(clean_log "$TMP_DIR/desktop-lock-unreadable.log")" \
+  "Writer recovery unavailable: /proc/locks could not be read"
+stop_fake_writer "$desktop_unreadable_lock_pid"
 
 start_same_user_live_process
 (
