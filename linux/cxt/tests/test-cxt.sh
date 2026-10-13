@@ -17,7 +17,6 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cxt-test.XXXXXX")"
 TMP_ROOT="$(cd -P "$TMP_ROOT" && pwd)"
 DEFAULT_CODEX_ARGS=(
   --no-alt-screen
-  -c 'tui.keymap.global.open_transcript="ctrl-t"'
 )
 
 cleanup() {
@@ -198,7 +197,8 @@ fi
 
 "$CXT" --cxt-help > "$TMP_ROOT/cxt-help"
 assert_file_contains "$TMP_ROOT/cxt-help" 'Usage: cxt [CXT_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]'
-assert_file_contains "$TMP_ROOT/cxt-help" '--sol       --model gpt-5.6-sol'
+assert_file_contains "$TMP_ROOT/cxt-help" '--sol       --model gpt-6.1-sol'
+assert_file_contains "$TMP_ROOT/cxt-help" '--luna      --model gpt-6-luna'
 assert_file_contains "$TMP_ROOT/cxt-help" '--astra     --model gpt-6-astra'
 assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + on-request approvals'
 ! grep -Fq -- '--gpt54' "$TMP_ROOT/cxt-help" || fail 'retired --gpt54 remains in cxt help'
@@ -206,8 +206,14 @@ assert_file_contains "$TMP_ROOT/cxt-help" '--safe       read-only + on-request a
 assert_file_contains "$TMP_ROOT/cxt-help" '--attach, --at [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-session, --ks [SESSION]'
 assert_file_contains "$TMP_ROOT/cxt-help" '--kill-all, --ka'
-assert_file_contains "$TMP_ROOT/cxt-help" 'Ctrl+T        Open the current Codex transcript'
-assert_file_contains "$TMP_ROOT/cxt-help" 'Without tmux, Codex still launches directly with transcript access enabled.'
+for retired in --gpt55 --spark; do
+  ! grep -Fq -- "$retired" "$TMP_ROOT/cxt-help" || fail "retired $retired remains in cxt help"
+  ! grep -Fq -- "$retired" "$BASH_COMPLETION" || fail "retired $retired remains in bash completion"
+  ! grep -Fq -- "$retired" "$ZSH_COMPLETION" || fail "retired $retired remains in zsh completion"
+done
+assert_file_contains "$TMP_ROOT/cxt-help" 'Transcript keys follow your Codex configuration, with or without tmux.'
+assert_file_contains "$TMP_ROOT/cxt-help" 'No config override is injected by default, allowing the shared Codex server.'
+assert_file_contains "$TMP_ROOT/cxt-help" 'Reasoning shortcuts use -c; Codex may warn and use embedded mode.'
 assert_file_contains "$TMP_ROOT/cxt-help" 'With tmux, new cxt windows keep up to 50000 lines of scrollback.'
 
 run_direct_case empty
@@ -222,16 +228,37 @@ run_direct_case model-astra --astra
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-6-astra
 
 run_direct_case model-sol --sol
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-6.1-sol
 
 run_direct_case model-terra --terra
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-terra
 
 run_direct_case model-luna --luna
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-luna
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-6-luna
 
-run_direct_case model-gpt55 --gpt55
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.5
+for retired in gpt55 spark; do
+  case "$retired" in
+    gpt55) retired_model=gpt-5.5 ;;
+    spark) retired_model=gpt-5.3-codex-spark ;;
+  esac
+  retired_root="$TMP_ROOT/retired-$retired"
+  mkdir -p "$retired_root/project"
+  make_minimal_bin "$retired_root/bin"
+  make_codex_mock "$retired_root/bin"
+  set +e
+  (
+    cd "$retired_root/project"
+    PATH="$retired_root/bin" CXT_CODEX_LOG="$retired_root/codex.args" "$CXT" "--$retired"
+  ) 2> "$retired_root/stderr"
+  retired_status=$?
+  set -e
+  [ "$retired_status" -eq 2 ] || fail "retired --$retired returned $retired_status instead of 2"
+  assert_file_contains "$retired_root/stderr" "cxt: --$retired is retired because $retired_model is not list-visible"
+  assert_file_contains "$retired_root/stderr" "use --model $retired_model directly"
+  [ ! -e "$retired_root/codex.args" ] || fail "retired --$retired launched Codex"
+  run_direct_case "native-$retired" --model "$retired_model"
+  assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model "$retired_model"
+done
 
 gpt54_root="$TMP_ROOT/retired-gpt54"
 mkdir -p "$gpt54_root/project"
@@ -266,9 +293,6 @@ assert_file_contains "$mini_root/stderr" 'cxt: --mini is retired because gpt-5.4
 run_direct_case native-mini --model gpt-5.4-mini
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.4-mini
 
-run_direct_case model-spark --spark
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.3-codex-spark
-
 run_direct_case permission-safe --safe
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --sandbox read-only --ask-for-approval on-request
 
@@ -287,7 +311,7 @@ assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort=
 run_direct_case all-shortcuts --sol --high --auto 'prompt with spaces'
 assert_args "$DIRECT_LOG" \
   "${DEFAULT_CODEX_ARGS[@]}" \
-  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
   -c 'model_reasoning_effort="high"' \
   --sandbox workspace-write \
   --ask-for-approval on-request \
@@ -296,8 +320,11 @@ assert_args "$DIRECT_LOG" \
 run_direct_case prompt --xhigh '현재 프로젝트의 테스트를 수정해줘'
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -c 'model_reasoning_effort="xhigh"' '현재 프로젝트의 테스트를 수정해줘'
 
-run_direct_case passthrough -- --astra --sol --gpt54 --mini --high --auto --madmax --at --ks --ka
-assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --astra --sol --gpt54 --mini --high --auto --madmax --at --ks --ka
+run_direct_case passthrough -- --astra --sol --gpt54 --mini --gpt55 --spark --high --auto --madmax --at --ks --ka '' 'prompt with spaces'
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" -- --astra --sol --gpt54 --mini --gpt55 --spark --high --auto --madmax --at --ks --ka '' 'prompt with spaces'
+
+run_direct_case native-daemon --no-daemon --enable daemon_auto_start --disable analytics_plan_history --search
+assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --no-daemon --enable daemon_auto_start --disable analytics_plan_history --search
 
 run_direct_case native --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
 assert_args "$DIRECT_LOG" "${DEFAULT_CODEX_ARGS[@]}" --model gpt-5.6-sol --sandbox workspace-write --ask-for-approval on-request --image './reference image.png'
@@ -682,7 +709,14 @@ assert_args "$tmux_root/tmux.args.6" kill-session -t codex-Project-name-demo-000
 install_home="$TMP_ROOT/install-home"
 mkdir -p "$install_home"
 printf '# Keep this ~/.local/bin note\nexport EDITOR=vim\n' > "$install_home/.zshrc"
-HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER"
+mkdir -p "$install_home/.codex"
+printf '[tui.keymap.global]\nopen_transcript = "alt-t"\n' > "$install_home/.codex/config.toml"
+cp "$install_home/.codex/config.toml" "$install_home/codex-config.before"
+HOME="$install_home" SHELL=/bin/zsh PATH="$ORIGINAL_PATH" "$INSTALLER" > "$install_home/install.out"
+assert_file_contains "$install_home/install.out" 'source the rc file again to refresh completion'
+assert_file_contains "$install_home/install.out" 'Codex config and transcript keys are left unchanged'
+cmp -s "$install_home/codex-config.before" "$install_home/.codex/config.toml" || \
+  fail 'installer changed the user Codex keymap'
 [ -L "$install_home/.local/bin/cxt" ] || fail 'installer did not create the cxt symlink'
 [ "$(readlink "$install_home/.local/bin/cxt")" = "$CXT" ] || fail 'installer link target is not the absolute cxt path'
 assert_file_contains "$install_home/.zshrc" '# Keep this ~/.local/bin note'

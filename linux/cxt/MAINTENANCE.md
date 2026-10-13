@@ -4,18 +4,32 @@
 
 ## 마지막 검토 기준
 
-- 검토일: 2026-09-11
-- Codex CLI: `codex-cli 0.154.0`
-- 로컬 모델 카탈로그 client version: `0.153.4`
+- 검토일: 2026-10-14
+- Codex CLI: `codex-cli 0.162.1`
+- 로컬 모델 카탈로그 client version: `0.162.1`
+- 로컬 모델 카탈로그 fetched_at: `2026-10-13T16:23:45.513920406Z`
 - 공식 기준: [Codex configuration reference](https://developers.openai.com/codex/config-reference), 현재 CLI 도움말, 현재 사용자에게 노출된 로컬 모델 카탈로그
 
-이번 기준점에서 `gpt-6-astra`가 list-visible이므로 `--astra`를 추가했습니다.
-`gpt-5.4`와 `gpt-5.4-mini`는 list-visible 카탈로그에 없으므로 `--gpt54`와
-`--mini`는 retired 상태입니다. 네이티브 `--model` 전달은 유지합니다.
-모델 캐시는 2026-09-11에 갱신되었지만 client version은 `0.153.4`이므로,
-설치된 CLI `0.154.0`과 구분해 기록합니다. Astra slug는
-[공식 모델 문서](https://developers.openai.com/api/docs/models/gpt-6-astra)와도
-교차 확인했으며, 편의 별칭 자격은 현재 로컬 list-visible 카탈로그 기준입니다.
+이번 기준점에서 `--sol`은 `gpt-6.1-sol`, `--luna`는 `gpt-6-luna`를 선택합니다.
+`--astra`의 `gpt-6-astra`와 `--terra`의 `gpt-5.6-terra`도 list-visible이므로 유지합니다.
+`gpt-5.5`와 `gpt-5.3-codex-spark`는 list-visible 카탈로그에 없으므로
+`--gpt55`와 `--spark`를 retired 처리했습니다. `--gpt54`와 `--mini`도 retired 상태를 유지합니다.
+네이티브 `--model` 전달은 유지하며, 이전 Sol/Luna 버전도 직접 지정할 수 있습니다.
+현재 Sol/Astra/Terra는 `ultra`까지, Luna는 `max`까지 지원합니다.
+
+기본 transcript용 `-c` 주입은 제거했습니다. Codex `0.162.1`의 시작 경고는
+명령행 설정 override (`-c`, `--enable`, `--disable`, `--search`)가 embedded mode를
+요구한다고 안내합니다. 기본 cxt는 공유 서버 사용을 허용하고 transcript 키는
+사용자의 Codex 설정을 그대로 따릅니다. reasoning 편의 옵션은 기존 `-c` 변환을
+유지하므로 해당 제약을 안내합니다. `--no-daemon`은 자동 추가하지 않습니다.
+키맵 파일 설정은 [공식 설정 문서](https://learn.chatgpt.com/docs/config-file/config-basic#tui-keymap)로 확인했습니다.
+
+격리된 Linux HOME/CODEX_HOME에서 실제 CLI `0.162.1`로 수정 전 경고를 재현하고,
+수정 후 기본 실행이 경고 없이 공유 daemon에 연결되는 것을 확인했습니다.
+tmux 실행과 tmux 없는 직접 실행 모두 사용자 설정의 `Alt+T`로 transcript가 열렸습니다.
+`--high` 실행에서는 선택한 정책대로 embedded-mode 경고가 유지됩니다.
+모델 작업은 실행하지 않았으며, 실제 macOS 터미널과 모델 응답은 검증하지 않았습니다.
+
 현재 CLI 플래그 파서는 `--ask-for-approval`에 `on-request`와 `never`만 허용하므로,
 `--safe`는 `read-only + on-request`로 검증합니다. 설정 파일이 지원하는 값과
 CLI 플래그가 실제로 받는 값이 다를 수 있으므로 둘을 구분해 확인합니다.
@@ -92,7 +106,9 @@ macOS의 trailing-slash TMPDIR를 물리 경로로 정규화했습니다. 검사
    - 각 reasoning 별칭이 현재 모델들이 지원하는 값인가
    - `--sandbox`와 `--ask-for-approval` 값이 현재 CLI 도움말과 일치하는가
    - Codex가 `tui.keymap.global.open_transcript`와 `ctrl-t`를 계속 허용하고 transcript pager를 여는가
-   - tmux가 없는 직접 실행에도 transcript 바인딩이 적용되고, tmux history-limit은 cxt window에만 적용되는가
+   - 기본 실행에 transcript용 `-c`나 `--no-daemon`이 주입되지 않고 사용자 키맵을 따르는가
+   - tmux가 없는 직접 실행에도 같은 키맵 정책이 적용되고, tmux history-limit은 cxt window에만 적용되는가
+   - reasoning override 사용 시 embedded-mode 제약 안내가 현재 Codex 동작과 일치하는가
    - deprecated 또는 새 위험 옵션이 권한 프리셋 의미를 바꾸지 않았는가
    - 모든 새 Codex 네이티브 옵션이 여전히 변환 없이 전달되는가
    - `--` 뒤의 값과 공백이 포함된 인자의 boundary가 보존되는가
@@ -127,6 +143,7 @@ macOS의 trailing-slash TMPDIR를 물리 경로로 정규화했습니다. 검사
 - 모델별 reasoning effort 지원 범위
 - safe/auto/full-auto/madmax 권한 프리셋의 sandbox 및 approval 의미
 - 네이티브 옵션 passthrough와 -- 이후 무변환 계약
+- 기본 공유 서버 사용과 사용자 키맵 존중, reasoning override의 embedded-mode 제약
 
 drift가 확인된 경우에만 linux/cxt/bin/cxt, --cxt-help, completions/cxt.bash, completions/cxt.zsh, README.md, tests/test-cxt.sh, MAINTENANCE.md의 마지막 검토 기준을 함께 갱신한다. 추측한 모델이나 숨겨진 모델을 추가하지 않는다. npm/Node 런타임 의존성을 추가하지 않는다. 실제 사용자 홈이나 shell rc를 수정하지 않는다.
 

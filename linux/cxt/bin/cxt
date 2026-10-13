@@ -4,7 +4,6 @@
 
 CXT_SESSION_PREFIX='codex-'
 CXT_TMUX_HISTORY_LIMIT='50000'
-CXT_TRANSCRIPT_CONFIG='tui.keymap.global.open_transcript="ctrl-t"'
 
 print_cxt_help() {
   cat <<'EOF'
@@ -13,11 +12,9 @@ Usage: cxt [CXT_OPTIONS] [CODEX_OPTIONS] [PROMPT|COMMAND ...]
 cxt shortcuts:
   Models:
     --astra     --model gpt-6-astra
-    --sol       --model gpt-5.6-sol
+    --sol       --model gpt-6.1-sol
     --terra     --model gpt-5.6-terra
-    --luna      --model gpt-5.6-luna
-    --gpt55     --model gpt-5.5
-    --spark     --model gpt-5.3-codex-spark
+    --luna      --model gpt-6-luna
 
   Reasoning (model support varies):
     --low --medium --high --xhigh --max --ultra
@@ -34,12 +31,14 @@ cxt shortcuts:
     --kill-all, --ka               Kill all cxt sessions
 
   Other:
-    Ctrl+T        Open the current Codex transcript
     --cxt-help    Show this help
     --            Stop interpreting cxt shortcuts
 
 All other options are passed to Codex unchanged.
-Without tmux, Codex still launches directly with transcript access enabled.
+Transcript keys follow your Codex configuration, with or without tmux.
+No config override is injected by default, allowing the shared Codex server.
+Reasoning shortcuts use -c; Codex may warn and use embedded mode.
+Native -c, --enable, --disable, and --search have the same limitation.
 With tmux, new cxt windows keep up to 50000 lines of scrollback.
 EOF
 }
@@ -278,7 +277,6 @@ add_permission_shortcut() {
 
 codex_args=(
   --no-alt-screen
-  -c "$CXT_TRANSCRIPT_CONFIG"
 )
 passthrough=0
 model_shortcut=
@@ -350,7 +348,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --sol)
       codex_input_seen=1
-      add_model_shortcut "$arg" gpt-5.6-sol
+      add_model_shortcut "$arg" gpt-6.1-sol
       ;;
     --terra)
       codex_input_seen=1
@@ -358,11 +356,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --luna)
       codex_input_seen=1
-      add_model_shortcut "$arg" gpt-5.6-luna
+      add_model_shortcut "$arg" gpt-6-luna
       ;;
     --gpt55)
-      codex_input_seen=1
-      add_model_shortcut "$arg" gpt-5.5
+      printf '%s\n' \
+        'cxt: --gpt55 is retired because gpt-5.5 is not list-visible; use --model gpt-5.5 directly if your account exposes it' >&2
+      exit 2
       ;;
     --gpt54)
       printf '%s\n' \
@@ -375,8 +374,9 @@ while [ "$#" -gt 0 ]; do
       exit 2
       ;;
     --spark)
-      codex_input_seen=1
-      add_model_shortcut "$arg" gpt-5.3-codex-spark
+      printf '%s\n' \
+        'cxt: --spark is retired because gpt-5.3-codex-spark is not list-visible; use --model gpt-5.3-codex-spark directly if your account exposes it' >&2
+      exit 2
       ;;
     --low|--medium|--high|--xhigh|--max|--ultra)
       codex_input_seen=1

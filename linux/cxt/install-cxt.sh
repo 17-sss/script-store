@@ -638,3 +638,5 @@ fi
 printf '\nInstallation complete. This installer cannot modify the parent shell environment.\n'
 printf 'Run the following command, or open a new terminal:\n'
 printf '  source "%s"\n' "$RC_FILE"
+printf 'The managed symlink follows repository updates; source the rc file again to refresh completion.\n'
+printf 'Codex config and transcript keys are left unchanged; see %s/README.md for Ctrl+T setup.\n' "$SCRIPT_DIR"

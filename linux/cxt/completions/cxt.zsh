@@ -61,11 +61,9 @@ _cxt() {
 
   cxt_options=(
     '--astra:use model gpt-6-astra'
-    '--sol:use model gpt-5.6-sol'
+    '--sol:use model gpt-6.1-sol'
     '--terra:use model gpt-5.6-terra'
-    '--luna:use model gpt-5.6-luna'
-    '--gpt55:use model gpt-5.5'
-    '--spark:use model gpt-5.3-codex-spark'
+    '--luna:use model gpt-6-luna'
     '--low:use low reasoning effort'
     '--medium:use medium reasoning effort'
     '--high:use high reasoning effort'
